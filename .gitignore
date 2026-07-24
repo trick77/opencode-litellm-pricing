@@ -1,0 +1,39 @@
+# dependencies
+node_modules/
+
+# build artifacts
+dist/
+*.tsbuildinfo
+
+# logs and runtime junk
+*.log
+npm-debug.log*
+
+# coverage and cache
+coverage/
+.nyc_output/
+.cache/
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# editors
+.vscode/
+.idea/
+.fleet/
+.zed/
+*.swp
+*.swo
+*~
+
+# agentic coding tools (per-project state, often contains chat logs)
+.claude/
+.cursor/
+.aider*
+.continue/
+.windsurf/
+.codex/
+.goose/
+.opencode/
