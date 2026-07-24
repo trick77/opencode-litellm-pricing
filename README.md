@@ -2,12 +2,18 @@
 
 An [OpenCode](https://opencode.ai) plugin that discovers the models exposed
 by a [LiteLLM](https://litellm.ai) proxy at startup and injects them into the
-model picker — each with a **real per-model `cost` block** sourced from the
-proxy's `/v1/model/info`, so OpenCode's on-screen cost matches what LiteLLM
-actually bills.
+model picker — each with a **real per-model `cost` block**, so OpenCode shows
+real pricing instead of `$0`.
 
-Most LiteLLM discovery plugins register model names but leave `cost` blank
-(OpenCode then shows `$0`). This one fills it in.
+Cost is sourced two ways, auto-detected from the key OpenCode uses:
+
+- **admin / master key** → LiteLLM's own **bill-exact** numbers from
+  `/v1/model/info`;
+- **developer key** (for which that endpoint is admin-gated) → **public list
+  prices** from OpenCode's own models.dev catalog.
+
+Either way you get pricing — which most LiteLLM discovery plugins leave blank.
+See [How pricing works](#how-pricing-works) for the details.
 
 ## Install
 
@@ -75,8 +81,10 @@ tier is **not** mapped — forcing 272k into a 200k bucket would overcharge the
 
 If neither path yields a cost, the `cost` block is **omitted** rather than shown
 wrong. Existing entries you've hand-curated under `provider.*.models` are never
-overwritten. Embedding / image / audio / rerank / moderation models and wildcard
-(`*`) entries are skipped.
+overwritten. Non-chat models — embedding / image / audio, plus rerank /
+moderation when LiteLLM reports the `mode` (admin path; the dev-key path
+classifies by name and catches embedding / audio / image) — and wildcard (`*`)
+entries are skipped.
 
 ## Provider matching
 
