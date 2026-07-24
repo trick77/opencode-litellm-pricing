@@ -76,8 +76,10 @@ test('pipeline: chat model injected with real cost, no 200k tier', async () => {
   try {
     const map = await discoverLiteLLMModelInfo('http://proxy')
     const info = map.get('ai-gateway-gpt-5.4')
+    // toConfigModel merges info onto the bare /v1/models entry itself
+    // (single code path — the real one exercised in production).
     const model: LiteLLMModel = { id: 'ai-gateway-gpt-5.4', object: 'model' }
-    const entry = toConfigModel({ ...model, ...info } as LiteLLMModel, info)!
+    const entry = toConfigModel(model, info)!
     assert.deepEqual(entry.cost, { input: 2.5, output: 15, cache_read: 0.25 })
     assert.equal((entry.cost as Record<string, unknown>).context_over_200k, undefined)
     assert.deepEqual(entry.limit, { context: 1050000, output: 128000 })

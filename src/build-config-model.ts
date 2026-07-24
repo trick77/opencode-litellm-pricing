@@ -3,6 +3,7 @@
 // including the per-model `cost` block — the reason this plugin exists.
 
 import type { CostBlock, CostTier, LiteLLMModel, LiteLLMModelInfo } from './types.ts'
+import type { CatalogFields } from './catalog.ts'
 import { categorizeModel, formatModelName } from './format-model-name.ts'
 
 // LiteLLM reports cost as USD per token; opencode expects USD per 1,000,000
@@ -10,7 +11,9 @@ import { categorizeModel, formatModelName } from './format-model-name.ts'
 const TOKENS_PER_MILLION = 1_000_000
 
 function perMillion(value: number | null | undefined): number | undefined {
-  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return undefined
+  // Absent (null/undefined), non-finite, or negative → "no value". A
+  // legitimate 0 (a free input/cache tier) is preserved, not dropped.
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return undefined
   // Round to 6 decimals to strip floating-point noise from the ×1e6 scale
   // (e.g. 5e-8 * 1e6 = 0.05000000000000001 -> 0.05) so clean numbers land
   // in the injected config. 6 decimals = sub-cent-per-million precision.
@@ -22,7 +25,8 @@ function perMillion(value: number | null | undefined): number | undefined {
  *
  * opencode's schema REQUIRES both `input` and `output`. If the proxy did
  * not surface both, we return `undefined` and omit `cost` entirely — a
- * blank price is preferable to a partial or misleading one.
+ * blank price is preferable to a partial or misleading one. A cost of 0 is
+ * a real value (free tier) and is kept.
  *
  * Tiered pricing is emitted only for LiteLLM's *_above_200k_tokens keys,
  * which match opencode's fixed `context_over_200k` bucket. LiteLLM's
@@ -71,41 +75,91 @@ function buildTier(
 }
 
 /**
+ * Overlay /v1/model/info metadata onto a /v1/models entry (the lean entry
+ * wins; the info block fills gaps — notably `mode`, token limits, and
+ * capability flags, which /v1/models omits for database-defined models).
+ */
+export function enrichModel(model: LiteLLMModel, info: LiteLLMModelInfo): LiteLLMModel {
+  return {
+    ...model,
+    mode: model.mode ?? info.mode,
+    max_tokens: model.max_tokens ?? info.max_tokens,
+    max_input_tokens: model.max_input_tokens ?? info.max_input_tokens,
+    max_output_tokens: model.max_output_tokens ?? info.max_output_tokens,
+    supports_function_calling: model.supports_function_calling ?? info.supports_function_calling,
+    supports_vision: model.supports_vision ?? info.supports_vision,
+    supports_reasoning: model.supports_reasoning ?? info.supports_reasoning,
+    supports_pdf_input: model.supports_pdf_input ?? info.supports_pdf_input,
+    supports_audio_input: model.supports_audio_input ?? info.supports_audio_input,
+  }
+}
+
+/**
  * Convert a discovered LiteLLM model into an opencode config model entry.
- * Returns `null` for non-chat models (embedding, image, audio) so they
- * don't clutter the picker.
- *
- * `info` supplies the cost block; capability/limit fields are read off
- * `model` (the caller merges `info` into `model` before calling this).
+ * Merges `info` onto `model` first (single code path), then returns `null`
+ * for anything that isn't a chat model (embedding/image/audio/rerank/
+ * moderation) so non-chat models don't clutter the picker.
  */
 export function toConfigModel(
   model: LiteLLMModel,
   info: LiteLLMModelInfo | undefined,
 ): Record<string, unknown> | null {
-  const type = categorizeModel(model)
-  if (type === 'embedding' || type === 'image' || type === 'audio') return null
+  const m = info ? enrichModel(model, info) : model
 
-  const entry: Record<string, unknown> = { name: formatModelName(model) }
+  if (categorizeModel(m) !== 'chat') return null
 
-  if (model.max_input_tokens || model.max_output_tokens) {
-    entry.limit = {
-      context: model.max_input_tokens ?? 0,
-      output: model.max_output_tokens ?? 0,
-    }
+  const entry: Record<string, unknown> = { name: formatModelName(m) }
+
+  // LiteLLM semantics: max_input_tokens = context window; max_output_tokens
+  // = max completion; max_tokens is the legacy alias of max_output_tokens
+  // (NOT total context). Emit a limit only when the context window is known,
+  // so we never report a bogus 0-token window.
+  const context = m.max_input_tokens
+  const output = m.max_output_tokens ?? m.max_tokens
+  if (context != null && output != null) {
+    entry.limit = { context, output }
   }
 
   const cost = buildCost(info)
   if (cost) entry.cost = cost
 
-  if (model.supports_function_calling) entry.tool_call = true
-  if (model.supports_reasoning) entry.reasoning = true
-  if (model.supports_vision) entry.attachment = true
+  if (m.supports_function_calling) entry.tool_call = true
+  if (m.supports_reasoning) entry.reasoning = true
+  if (m.supports_vision) entry.attachment = true
 
   const input: Array<'text' | 'image' | 'pdf' | 'audio'> = ['text']
-  if (model.supports_vision) input.push('image')
-  if (model.supports_pdf_input) input.push('pdf')
-  if (model.supports_audio_input) input.push('audio')
+  if (m.supports_vision) input.push('image')
+  if (m.supports_pdf_input) input.push('pdf')
+  if (m.supports_audio_input) input.push('audio')
   if (input.length > 1) entry.modalities = { input, output: ['text'] }
 
   return entry
+}
+
+/**
+ * Dev-key path: build a config entry from the models.dev catalog when
+ * LiteLLM's /v1/model/info is unavailable (admin-gated). There is no `mode`
+ * to classify on here, so filter non-chat models by the name heuristic;
+ * `fields` (matched from the catalog) supply cost/limit/capabilities and may
+ * be null when nothing matched (the model is still injected, just bare).
+ */
+export function configModelFromCatalog(
+  model: LiteLLMModel,
+  fields: CatalogFields | null,
+): Record<string, unknown> | null {
+  if (categorizeModel(model) !== 'chat') return null
+
+  const entry: Record<string, unknown> = { name: formatModelName(model) }
+  if (fields) applyCatalogFields(entry, fields)
+  return entry
+}
+
+/** Merge catalog fields into an entry, without overwriting existing keys. */
+export function applyCatalogFields(entry: Record<string, unknown>, fields: CatalogFields): void {
+  if (fields.cost && !entry.cost) entry.cost = fields.cost
+  if (fields.limit && !entry.limit) entry.limit = fields.limit
+  if (fields.reasoning && entry.reasoning == null) entry.reasoning = true
+  if (fields.tool_call && entry.tool_call == null) entry.tool_call = true
+  if (fields.attachment && entry.attachment == null) entry.attachment = true
+  if (fields.modalities && !entry.modalities) entry.modalities = fields.modalities
 }

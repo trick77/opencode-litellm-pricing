@@ -2,15 +2,20 @@
 //
 // An opencode plugin that discovers models from a LiteLLM proxy at startup
 // and injects them into the provider's `models` map — each carrying a real
-// per-model `cost` block sourced from the proxy's /v1/model/info, so
-// opencode's cost display matches what LiteLLM actually bills.
+// per-model `cost` block, so opencode's cost display matches what LiteLLM
+// bills.
+//
+// Cost is sourced with a dual path, auto-detecting the key:
+//   • admin/master key → LiteLLM's own /v1/model/info (bill-exact)
+//   • developer key (that endpoint is admin-gated) → opencode's models.dev
+//     catalog, matched to the model by name (public list prices)
 //
 // Configure in opencode.json:
 //
 //   {
 //     "plugin": ["opencode-litellm-pricing@latest"],
 //     "provider": {
-//       "litellm": {
+//       "opencode-litellm-pricing": {
 //         "npm": "@ai-sdk/openai-compatible",
 //         "name": "LiteLLM (proxy)",
 //         "options": {
@@ -21,22 +26,38 @@
 //     }
 //   }
 
-import type { Plugin, PluginInput } from '@opencode-ai/plugin'
-import type { LiteLLMModel, LiteLLMModelInfo } from './types.ts'
+import type { Config, Plugin, PluginInput } from '@opencode-ai/plugin'
+import type { LiteLLMModelInfo } from './types.ts'
+import type { CatalogFields } from './catalog.ts'
 import {
   autoDetectLiteLLM,
-  checkLiteLLMHealth,
   discoverLiteLLMModelInfo,
   discoverLiteLLMModels,
   normalizeBaseURL,
+  resolveApiKey,
 } from './litellm-api.ts'
-import { toConfigModel } from './build-config-model.ts'
+import { applyCatalogFields, configModelFromCatalog, toConfigModel } from './build-config-model.ts'
+import { getCatalog } from './catalog.ts'
 
 // Default provider id — kept identical to the npm package name so the
 // `plugin` and `provider` keys in opencode.json read the same.
 const PROVIDER_ID = 'opencode-litellm-pricing'
-// Covers the 3s health check plus the parallel 15s models/model-info fetch.
+// Covers the parallel 15s models/model-info fetch, with headroom.
 const DISCOVERY_TIMEOUT_MS = 20000
+
+// Minimal mutable view of the parts of opencode's config we touch. Typing
+// the hook parameter as opencode's `Config` (below) and narrowing to this
+// gives real type-checking on the config shape — a `config.providers` typo
+// no longer compiles — while still allowing loose model-entry objects.
+interface MutableProvider {
+  npm?: string
+  name?: string
+  options?: Record<string, unknown>
+  models?: Record<string, Record<string, unknown>>
+}
+interface MutableConfig {
+  provider?: Record<string, MutableProvider>
+}
 
 /**
  * opencode invokes the `config` hook several times per run with a
@@ -69,36 +90,24 @@ function readCustomHeaders(options: Record<string, unknown>): Record<string, str
   return Object.keys(out).length > 0 ? out : undefined
 }
 
-/**
- * Overlay /v1/model/info metadata onto a /v1/models entry. Fields already
- * present on the lean entry win; the info block fills gaps — notably `mode`
- * and token limits, which /v1/models omits for database-defined models.
- */
-function enrichModel(model: LiteLLMModel, info: LiteLLMModelInfo): LiteLLMModel {
+export const LiteLLMPricingPlugin: Plugin = async (input: PluginInput) => {
   return {
-    ...model,
-    mode: model.mode ?? info.mode,
-    max_tokens: model.max_tokens ?? info.max_tokens,
-    max_input_tokens: model.max_input_tokens ?? info.max_input_tokens,
-    max_output_tokens: model.max_output_tokens ?? info.max_output_tokens,
-    supports_function_calling: model.supports_function_calling ?? info.supports_function_calling,
-    supports_vision: model.supports_vision ?? info.supports_vision,
-    supports_reasoning: model.supports_reasoning ?? info.supports_reasoning,
-    supports_pdf_input: model.supports_pdf_input ?? info.supports_pdf_input,
-    supports_audio_input: model.supports_audio_input ?? info.supports_audio_input,
-  }
-}
-
-export const LiteLLMPricingPlugin: Plugin = async (_input: PluginInput) => {
-  return {
-    config: async (config: any) => {
+    config: async (rawConfig: Config) => {
+      const config = rawConfig as unknown as MutableConfig
       if (!config.provider) config.provider = {}
+      const providers = config.provider
 
-      // Collect matching providers; fall back to a default `litellm` entry
-      // for zero-config auto-detection.
-      const matched: Array<{ id: string; provider: Record<string, unknown> }> = []
-      for (const id of Object.keys(config.provider)) {
-        const provider = config.provider[id]
+      // models.dev catalog fields for a model name, loaded lazily & once.
+      const resolveCatalog = async (name: string): Promise<CatalogFields | null> => {
+        const catalog = await getCatalog(input.client)
+        return catalog?.resolve(name) ?? null
+      }
+
+      // Collect matching providers; fall back to a default entry for
+      // zero-config auto-detection.
+      const matched: Array<{ id: string; provider: MutableProvider }> = []
+      for (const id of Object.keys(providers)) {
+        const provider = providers[id]
         if (provider && typeof provider === 'object') {
           const options = (provider.options ?? {}) as Record<string, unknown>
           if (isLiteLLMProvider(id, options)) matched.push({ id, provider })
@@ -107,7 +116,7 @@ export const LiteLLMPricingPlugin: Plugin = async (_input: PluginInput) => {
       if (matched.length === 0) {
         matched.push({
           id: PROVIDER_ID,
-          provider: config.provider[PROVIDER_ID] ?? {
+          provider: providers[PROVIDER_ID] ?? {
             npm: '@ai-sdk/openai-compatible',
             name: 'LiteLLM (proxy)',
             options: {},
@@ -121,7 +130,7 @@ export const LiteLLMPricingPlugin: Plugin = async (_input: PluginInput) => {
         const configuredBase = typeof options.baseURL === 'string' ? options.baseURL : undefined
         const configuredKey =
           typeof options.apiKey === 'string' && options.apiKey ? options.apiKey : undefined
-        const apiKey = configuredKey ?? process.env.LITELLM_API_KEY ?? process.env.LITELLM_MASTER_KEY
+        const apiKey = resolveApiKey(configuredKey)
         const customHeaders = readCustomHeaders(options)
 
         const baseURL = configuredBase
@@ -136,28 +145,22 @@ export const LiteLLMPricingPlugin: Plugin = async (_input: PluginInput) => {
         }
 
         // Ensure the provider entry exists and is minimally wired.
-        if (!config.provider[providerId]) config.provider[providerId] = provider
-        const actual = config.provider[providerId] as Record<string, unknown>
+        if (!providers[providerId]) providers[providerId] = provider
+        const actual = providers[providerId]!
         if (!actual.npm) actual.npm = '@ai-sdk/openai-compatible'
         if (!actual.options) actual.options = { baseURL: `${baseURL}/v1` }
-        else {
-          const opts = actual.options as Record<string, unknown>
-          if (!opts.baseURL) opts.baseURL = `${baseURL}/v1`
+        else if (!(actual.options as Record<string, unknown>).baseURL) {
+          ;(actual.options as Record<string, unknown>).baseURL = `${baseURL}/v1`
         }
         if (!actual.models) actual.models = {}
-        const models = actual.models as Record<string, unknown>
+        const models = actual.models
 
         const work = async () => {
           const already = injectedModelIds.get(baseURL)
           if (already && [...already].every((id) => models[id])) return
 
-          if (!(await checkLiteLLMHealth(baseURL, apiKey, customHeaders))) {
-            console.warn(
-              `[litellm-pricing] LiteLLM offline or unauthorized for provider "${providerId}" at ${baseURL}`,
-            )
-            return
-          }
-
+          // No standalone health probe: /v1/models below is the same request
+          // a probe would make, and its failure already means "offline".
           const [modelsResult, infoResult] = await Promise.allSettled([
             discoverLiteLLMModels(baseURL, apiKey, customHeaders),
             discoverLiteLLMModelInfo(baseURL, apiKey, customHeaders),
@@ -166,22 +169,17 @@ export const LiteLLMPricingPlugin: Plugin = async (_input: PluginInput) => {
           if (modelsResult.status === 'rejected') {
             const err = modelsResult.reason
             console.warn(
-              `[litellm-pricing] Model discovery failed for provider "${providerId}":`,
+              `[litellm-pricing] Model discovery failed for provider "${providerId}" at ${baseURL}:`,
               err instanceof Error ? err.message : String(err),
             )
             return
           }
 
           const discovered = modelsResult.value
+          // /v1/model/info is admin-gated; a developer key gets null here and
+          // the models.dev catalog supplies cost/limits instead.
           const infoByName: Map<string, LiteLLMModelInfo> | null =
             infoResult.status === 'fulfilled' ? infoResult.value : null
-          if (infoResult.status === 'rejected') {
-            const err = infoResult.reason
-            console.warn(
-              `[litellm-pricing] /v1/model/info unavailable for provider "${providerId}"; no cost/limits will be attached:`,
-              err instanceof Error ? err.message : String(err),
-            )
-          }
 
           if (discovered.length === 0) {
             console.warn(
@@ -192,9 +190,12 @@ export const LiteLLMPricingPlugin: Plugin = async (_input: PluginInput) => {
 
           let added = 0
           let priced = 0
+          let viaCatalog = 0
           let skipped = 0
           let wildcards = 0
           for (const model of discovered) {
+            // Skip malformed entries rather than throwing out of the hook.
+            if (!model || typeof model.id !== 'string') continue
             // Wildcard entries (`deepseek/*`) are access rules, not callable
             // models — invoking one sends a literal `*` upstream.
             if (model.id.includes('*')) {
@@ -205,7 +206,28 @@ export const LiteLLMPricingPlugin: Plugin = async (_input: PluginInput) => {
             if (models[model.id]) continue
 
             const info = infoByName?.get(model.id)
-            const entry = toConfigModel(info ? enrichModel(model, info) : model, info)
+            let entry: Record<string, unknown> | null
+            let filledFromCatalog = false
+
+            if (info) {
+              // Admin path: LiteLLM's own resolved data.
+              entry = toConfigModel(model, info)
+              // Top up anything LiteLLM didn't price/size from the catalog.
+              if (entry && (!entry.cost || !entry.limit)) {
+                const fields = await resolveCatalog(model.id)
+                if (fields) {
+                  const hadCost = entry.cost != null
+                  applyCatalogFields(entry, fields)
+                  if (!hadCost && entry.cost) filledFromCatalog = true
+                }
+              }
+            } else {
+              // Developer-key path: name-match against the models.dev catalog.
+              const fields = await resolveCatalog(model.id)
+              entry = configModelFromCatalog(model, fields)
+              if (entry?.cost) filledFromCatalog = true
+            }
+
             if (!entry) {
               skipped++
               continue
@@ -213,6 +235,7 @@ export const LiteLLMPricingPlugin: Plugin = async (_input: PluginInput) => {
             models[model.id] = entry
             added++
             if (entry.cost) priced++
+            if (filledFromCatalog) viaCatalog++
           }
 
           injectedModelIds.set(baseURL, new Set(Object.keys(models)))
@@ -220,16 +243,22 @@ export const LiteLLMPricingPlugin: Plugin = async (_input: PluginInput) => {
           console.log(
             `[litellm-pricing] provider "${providerId}": ${added} model(s) added` +
               ` (${priced} with pricing` +
+              (viaCatalog > 0 ? `, ${viaCatalog} via models.dev fallback` : '') +
               (skipped > 0 ? `, ${skipped} non-chat hidden` : '') +
               (wildcards > 0 ? `, ${wildcards} wildcard ignored` : '') +
               `) from ${baseURL}`,
           )
         }
 
+        let timer: ReturnType<typeof setTimeout> | undefined
         await Promise.race([
           work(),
-          new Promise<void>((resolve) => setTimeout(resolve, DISCOVERY_TIMEOUT_MS)),
-        ])
+          new Promise<void>((resolve) => {
+            timer = setTimeout(resolve, DISCOVERY_TIMEOUT_MS)
+          }),
+        ]).finally(() => {
+          if (timer) clearTimeout(timer)
+        })
       }
     },
   }

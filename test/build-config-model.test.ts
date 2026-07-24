@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { buildCost, toConfigModel } from '../src/build-config-model.ts'
+import { buildCost, configModelFromCatalog, toConfigModel } from '../src/build-config-model.ts'
 import type { LiteLLMModel, LiteLLMModelInfo } from '../src/types.ts'
 
 // Values below are taken verbatim from a real LiteLLM /v1/model/info
@@ -56,8 +56,13 @@ test('genuine 200k-boundary model emits context_over_200k', () => {
   })
 })
 
-test('cost omitted when output is 0 (e.g. embeddings) or missing', () => {
-  assert.equal(buildCost({ input_cost_per_token: 2e-8, output_cost_per_token: 0 }), undefined)
+test('a real 0 cost is kept, not dropped; cost omitted only when a rate is absent', () => {
+  // 0 is a legitimate value (free tier) — keep it.
+  assert.deepEqual(buildCost({ input_cost_per_token: 2e-8, output_cost_per_token: 0 }), {
+    input: 0.02,
+    output: 0,
+  })
+  // Missing input or output → no cost block (opencode requires both).
   assert.equal(buildCost({ input_cost_per_token: 2e-8 }), undefined)
   assert.equal(buildCost(undefined), undefined)
 })
@@ -65,6 +70,58 @@ test('cost omitted when output is 0 (e.g. embeddings) or missing', () => {
 test('embedding-mode models are filtered out of the picker', () => {
   const model = { id: 'ai-gateway-text-embedding-3-small', object: 'model', mode: 'embedding' } as LiteLLMModel
   assert.equal(toConfigModel(model, { input_cost_per_token: 2e-8, output_cost_per_token: 0 }), null)
+})
+
+test('rerank/moderation models are filtered out (only chat is injected)', () => {
+  const rerank = { id: 'cohere-rerank-v3', object: 'model', mode: 'rerank' } as LiteLLMModel
+  const moderation = { id: 'omni-moderation', object: 'model', mode: 'moderation' } as LiteLLMModel
+  assert.equal(toConfigModel(rerank, undefined), null)
+  assert.equal(toConfigModel(moderation, undefined), null)
+})
+
+test('a chat model with "audio" in its id is NOT hidden when mode is absent', () => {
+  // gpt-4o-audio-preview is a chat model; the id heuristic must not hide it.
+  const model = { id: 'gpt-4o-audio-preview', object: 'model' } as LiteLLMModel
+  const entry = toConfigModel(model, undefined)
+  assert.notEqual(entry, null)
+  assert.equal(entry!.name, 'GPT 4o Audio Preview')
+})
+
+test('limit uses max_tokens as the output fallback and never emits context 0', () => {
+  // Only max_output known → no context window known → no limit (not context:0).
+  const outputOnly = { id: 'm', object: 'model', mode: 'chat', max_output_tokens: 4096 } as LiteLLMModel
+  assert.equal(toConfigModel(outputOnly, undefined)!.limit, undefined)
+  // max_tokens is LiteLLM's legacy alias for max output, used as the fallback.
+  const withMaxTokens = {
+    id: 'm2',
+    object: 'model',
+    mode: 'chat',
+    max_input_tokens: 200000,
+    max_tokens: 8192,
+  } as LiteLLMModel
+  assert.deepEqual(toConfigModel(withMaxTokens, undefined)!.limit, { context: 200000, output: 8192 })
+})
+
+test('configModelFromCatalog: filters non-chat by name, applies catalog fields to chat', () => {
+  // Embedding filtered even without mode (name heuristic).
+  const embed = { id: 'ai-gateway-text-embedding-3-small', object: 'model' } as LiteLLMModel
+  assert.equal(configModelFromCatalog(embed, null), null)
+
+  // Chat model, no catalog match → bare entry (still injected).
+  const chat = { id: 'ai-gateway-gpt-5.4', object: 'model' } as LiteLLMModel
+  assert.deepEqual(configModelFromCatalog(chat, null), { name: 'AI Gateway GPT 5.4' })
+
+  // Chat model with catalog fields → fields applied.
+  const entry = configModelFromCatalog(chat, {
+    cost: { input: 2.5, output: 15, cache_read: 0.25 },
+    limit: { context: 1050000, output: 128000 },
+    reasoning: true,
+    tool_call: true,
+  })!
+  assert.deepEqual(entry.cost, { input: 2.5, output: 15, cache_read: 0.25 })
+  assert.deepEqual(entry.limit, { context: 1050000, output: 128000 })
+  assert.equal(entry.reasoning, true)
+  assert.equal(entry.tool_call, true)
 })
 
 test('chat model carries name, limit, cost, and capability flags', () => {
