@@ -6,6 +6,7 @@
 import type {
   LiteLLMModel,
   LiteLLMModelInfo,
+  LiteLLMModelInfoEntry,
   LiteLLMModelInfoResponse,
   LiteLLMModelsResponse,
 } from './types.ts'
@@ -22,6 +23,10 @@ const NUMERIC_INFO_KEYS = [
   'output_cost_per_token',
   'cache_read_input_token_cost',
   'cache_creation_input_token_cost',
+  'input_cost_per_token_above_200k_tokens',
+  'output_cost_per_token_above_200k_tokens',
+  'cache_read_input_token_cost_above_200k_tokens',
+  'cache_creation_input_token_cost_above_200k_tokens',
   'max_tokens',
   'max_input_tokens',
   'max_output_tokens',
@@ -53,12 +58,21 @@ export function buildAPIURL(baseURL: string, endpoint: string = MODELS_ENDPOINT)
   return `${normalizeBaseURL(baseURL)}${endpoint}`
 }
 
+/**
+ * Resolve the API key: an explicit value wins, else the LiteLLM env vars.
+ * Single source of precedence, used by both the header builder and the
+ * plugin's discovery call.
+ */
+export function resolveApiKey(explicit?: string): string | undefined {
+  return explicit ?? process.env.LITELLM_API_KEY ?? process.env.LITELLM_MASTER_KEY
+}
+
 function buildHeaders(
   apiKey?: string,
   customHeaders?: Record<string, string>,
 ): Record<string, string> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-  const key = apiKey ?? process.env.LITELLM_API_KEY ?? process.env.LITELLM_MASTER_KEY
+  const key = resolveApiKey(apiKey)
   if (key) headers['Authorization'] = `Bearer ${key}`
   if (customHeaders) Object.assign(headers, customHeaders)
   return headers
@@ -124,14 +138,13 @@ export async function discoverLiteLLMModelInfo(
   const data = (await response.json()) as LiteLLMModelInfoResponse
   const infoByName = new Map<string, LiteLLMModelInfo>()
 
+  // Build each entry's info once, filling cost/capability gaps from
+  // litellm_params (some deployments declare them there, not in model_info).
+  const built: Array<{ entry: LiteLLMModelInfoEntry; info: LiteLLMModelInfo }> = []
   for (const entry of data.data ?? []) {
     if (!entry.model_info) continue
-    // Spread preserves cost fields verbatim. Some deployments set cost and
-    // capability flags on litellm_params rather than inside model_info, so
-    // fill any gaps from there.
-    const info: LiteLLMModelInfo = { ...entry.model_info }
+    const info: LiteLLMModelInfo = { ...entry.model_info } // spread preserves cost verbatim
     const params = entry.litellm_params ?? {}
-
     for (const flag of CAPABILITY_FLAGS) {
       const v = params[flag]
       if (info[flag] == null && typeof v === 'boolean') info[flag] = v
@@ -140,30 +153,75 @@ export async function discoverLiteLLMModelInfo(
       const v = params[numKey]
       if (info[numKey] == null && typeof v === 'number') info[numKey] = v
     }
+    built.push({ entry, info })
+  }
 
-    const keys = [
-      entry.model_name,
-      entry.model_info.key,
+  // Pass 1: register the public model_name (what /v1/models reports) so a
+  // public name always wins. Pass 2: register internal aliases
+  // (model_info.key, litellm_params.model) only if unclaimed — an earlier
+  // entry's alias must never shadow a later model's own public name.
+  for (const { entry, info } of built) {
+    if (entry.model_name && !infoByName.has(entry.model_name)) {
+      infoByName.set(entry.model_name, info)
+    }
+  }
+  for (const { entry, info } of built) {
+    const aliases = [
+      entry.model_info?.key,
       typeof entry.litellm_params?.model === 'string' ? entry.litellm_params.model : undefined,
     ]
-    for (const key of keys) {
-      if (key && !infoByName.has(key)) infoByName.set(key, info)
+    for (const alias of aliases) {
+      if (alias && !infoByName.has(alias)) infoByName.set(alias, info)
     }
   }
   return infoByName
 }
 
 /**
- * Try the common ports a LiteLLM proxy is started on. Default is 4000;
- * 8000 and 8080 are also widely used.
+ * Confirm a server is actually LiteLLM, not just any OpenAI-compatible
+ * server (vLLM, LM Studio, …) that answers /v1/models. `/v1/model/info` is
+ * LiteLLM-specific: a non-LiteLLM server 404s it, while LiteLLM returns 200
+ * or an auth error (401/403) — anything other than 404 marks it as LiteLLM.
+ */
+async function looksLikeLiteLLM(
+  baseURL: string,
+  apiKey?: string,
+  customHeaders?: Record<string, string>,
+): Promise<boolean> {
+  try {
+    const response = await fetch(buildAPIURL(baseURL, MODEL_INFO_ENDPOINT), {
+      method: 'GET',
+      headers: buildHeaders(apiKey, customHeaders),
+      signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
+    })
+    return response.status !== 404
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Try the common ports a LiteLLM proxy is started on (4000 default; 8000 /
+ * 8080 also common), concurrently, and return the first that is both
+ * reachable and identifiably LiteLLM. Concurrency keeps a blackholed port
+ * from serially stalling startup; the LiteLLM marker keeps a stray
+ * OpenAI-compatible server from binding as a phantom provider.
  */
 export async function autoDetectLiteLLM(
   apiKey?: string,
   customHeaders?: Record<string, string>,
 ): Promise<string | null> {
-  for (const port of [4000, 8000, 8080]) {
+  const probes = [4000, 8000, 8080].map((port) => {
     const baseURL = `http://localhost:${port}`
-    if (await checkLiteLLMHealth(baseURL, apiKey, customHeaders)) return baseURL
+    return (async () => {
+      const healthy = await checkLiteLLMHealth(baseURL, apiKey, customHeaders)
+      if (healthy && (await looksLikeLiteLLM(baseURL, apiKey, customHeaders))) return baseURL
+      throw new Error(`not LiteLLM at ${baseURL}`)
+    })()
+  })
+  try {
+    return await Promise.any(probes)
+  } catch {
+    return null
   }
-  return null
 }

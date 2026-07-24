@@ -3,9 +3,16 @@
 import type { LiteLLMModel, ModelType } from './types.ts'
 
 /**
- * Classify a model so non-chat models (embeddings, image, audio) can be
- * filtered out of the picker. Prefers LiteLLM's `mode`, falling back to
- * id heuristics when `mode` is absent.
+ * Classify a model so non-chat models (embedding, image, audio, rerank,
+ * moderation) can be filtered out of the picker. Prefers LiteLLM's `mode`
+ * (authoritative), falling back to conservative id heuristics only when
+ * `mode` is absent.
+ *
+ * The id heuristics are deliberately narrow: a false positive HIDES a
+ * usable chat model, which is worse than showing a stray non-chat one. So
+ * we match only strong, boundary-anchored signals — e.g. `whisper`/`tts`,
+ * not a bare `audio` substring (which would wrongly hide a chat model like
+ * `gpt-4o-audio-preview`).
  */
 export function categorizeModel(model: LiteLLMModel): ModelType {
   const mode = model.mode?.toLowerCase()
@@ -14,18 +21,14 @@ export function categorizeModel(model: LiteLLMModel): ModelType {
     if (mode === 'image_generation') return 'image'
     if (mode === 'audio_transcription' || mode === 'audio_speech') return 'audio'
     if (mode === 'chat' || mode === 'completion' || mode === 'responses') return 'chat'
-    // rerank / moderation / anything else → not a chat model
+    // rerank / moderation → not a chat model
     if (mode === 'rerank' || mode === 'moderation') return 'unknown'
   }
 
   const id = model.id.toLowerCase()
-  if (id.includes('embedding') || id.includes('embed')) return 'embedding'
-  if (id.includes('whisper') || id.includes('tts') || id.includes('transcribe') || id.includes('audio')) {
-    return 'audio'
-  }
-  if (id.includes('dall-e') || id.includes('dalle') || id.includes('stable-diffusion') || id.includes('flux')) {
-    return 'image'
-  }
+  if (/embedding|(?:^|[-_/])embed(?:$|[-_/])/.test(id)) return 'embedding'
+  if (/whisper|transcrib|(?:^|[-_/])tts(?:$|[-_/])/.test(id)) return 'audio'
+  if (/dall-?e|stable-diffusion|midjourney|(?:^|[-_/])flux(?:$|[-_/])/.test(id)) return 'image'
   return 'chat'
 }
 
