@@ -1,0 +1,43 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write   # to create the GitHub Release
+  id-token: write   # OIDC token used by npm trusted publishing
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: npm-publish
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org/
+      - run: npm ci --ignore-scripts
+      - run: npm run build
+      - run: npm test
+      - name: Verify package.json version matches the tag
+        run: |
+          tag="${GITHUB_REF#refs/tags/v}"
+          pkg=$(node -p "require('./package.json').version")
+          if [ "$tag" != "$pkg" ]; then
+            echo "tag $tag does not match package.json $pkg" >&2
+            exit 1
+          fi
+      # OIDC trusted publishing requires npm >= 11.5.1. Invoke via npx so we
+      # always get a recent enough CLI without mutating the runner's global
+      # npm install.
+      - run: npx -y npm@latest publish --access public --provenance
+      - uses: softprops/action-gh-release@v3
+        with:
+          generate_release_notes: true
