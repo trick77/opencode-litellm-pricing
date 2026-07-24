@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "opencode-litellm-pricing",
+  "version": "0.1.0",
+  "description": "OpenCode plugin: dynamic LiteLLM model discovery with real per-model pricing sourced from the proxy's /v1/model/info",
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": [
+    "src/",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc --noEmit",
+    "test": "tsc --noEmit && node --test test/*.test.ts"
+  },
+  "keywords": [
+    "opencode",
+    "litellm",
+    "plugin",
+    "llm-proxy",
+    "openai-compatible",
+    "pricing",
+    "cost"
+  ],
+  "author": "trick77 (https://github.com/trick77)",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/trick77/opencode-litellm-pricing.git"
+  },
+  "homepage": "https://github.com/trick77/opencode-litellm-pricing#readme",
+  "bugs": {
+    "url": "https://github.com/trick77/opencode-litellm-pricing/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "^1.18.4",
+    "@opencode-ai/sdk": "^1.18.4"
+  },
+  "devDependencies": {
+    "@types/node": "26.1.1",
+    "typescript": "7.0.2"
+  }
+}

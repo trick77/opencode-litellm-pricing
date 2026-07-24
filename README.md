@@ -36,8 +36,8 @@ proxy on ports 4000 / 8000 / 8080.
 
 ## How pricing works
 
-At startup the plugin fetches `/v1/models` and `/v1/model/info`, then for each
-chat-capable model injects a config entry including:
+At startup the plugin lists the proxy's models (`/v1/models`) and injects each
+chat-capable one into the picker with a config entry like:
 
 ```json
 {
@@ -47,26 +47,36 @@ chat-capable model injects a config entry including:
 }
 ```
 
-Cost is read from LiteLLM's resolved per-token fields (`input_cost_per_token`,
-`output_cost_per_token`, `cache_read_input_token_cost`) and scaled to
-OpenCode's per-1M-token convention (`× 1_000_000`, rounded to 6 decimals). If
-the proxy doesn't surface a resolved cost for a model, the `cost` block is
-**omitted** rather than shown as a wrong number.
+Cost is sourced with a **dual path**, auto-detected from the key opencode uses:
 
-**Tiered pricing:** OpenCode models a single `context_over_200k` tier, so the
-plugin maps LiteLLM's `*_above_200k_tokens` fields into it. LiteLLM's
-`*_above_272k_tokens` tier (used by some Azure/OpenAI models, e.g. GPT-5.x) is
-**not** mapped — forcing a 272k boundary into a 200k bucket would overcharge
-the 200k–272k band. Those models stay exact up to 272k on their base rate and
-only slightly under-count beyond it.
+**1. Admin / master key → LiteLLM's own numbers (bill-exact).** The plugin reads
+`/v1/model/info` and uses LiteLLM's resolved per-token fields
+(`input_cost_per_token`, …), scaled to opencode's per-1M convention
+(`× 1_000_000`, rounded). This matches your LiteLLM spend dashboard exactly. For
+Azure / custom deployments it requires `model_info.base_model` set on the model
+(so LiteLLM can resolve the price map — otherwise LiteLLM itself bills `$0`).
 
-> For Azure / custom deployments this requires `model_info.base_model` to be
-> set on the model in LiteLLM (so the proxy can resolve the price map). Without
-> it, LiteLLM itself bills `$0` and there is no cost to surface.
+**2. Developer key → models.dev fallback (public list prices).** `/v1/model/info`
+is **admin-gated in LiteLLM**, so a normal developer key can't read cost, limits,
+or capabilities from the proxy. In that case the plugin sources them from
+opencode's own **models.dev catalog** (via the plugin client — no external
+fetch), matching each LiteLLM model to a catalog entry by name: e.g.
+`ai-gateway-gpt-5.4` → `gpt-5.4` (longest-match, so `…-mini` beats the base,
+`azure` preferred over `openai`). These are public list prices, not your
+negotiated rates.
 
-Existing entries you've hand-curated under `provider.*.models` are never
-overwritten. Embedding / image / audio models and wildcard (`*`) entries are
-skipped.
+So an admin gets exact numbers; developers get correct public pricing with no
+admin key on their machines.
+
+**Tiered pricing:** opencode models a single `context_over_200k` tier. The
+LiteLLM path maps `*_above_200k_tokens` into it (LiteLLM's `*_above_272k_tokens`
+tier is **not** mapped — forcing 272k into a 200k bucket would overcharge the
+200k–272k band); the models.dev path maps `experimentalOver200K`.
+
+If neither path yields a cost, the `cost` block is **omitted** rather than shown
+wrong. Existing entries you've hand-curated under `provider.*.models` are never
+overwritten. Embedding / image / audio / rerank / moderation models and wildcard
+(`*`) entries are skipped.
 
 ## Provider matching
 
