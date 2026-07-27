@@ -34,10 +34,46 @@ jobs:
             echo "tag $tag does not match package.json $pkg" >&2
             exit 1
           fi
+      - name: Verify this version is not already on npm
+        run: |
+          pkg=$(node -p "require('./package.json').version")
+          name=$(node -p "require('./package.json').name")
+          if npm view "$name@$pkg" version --silent >/dev/null 2>&1; then
+            echo "::error::$name@$pkg is already published — npm rejects duplicate versions. Bump the version and tag again." >&2
+            exit 1
+          fi
       # OIDC trusted publishing requires npm >= 11.5.1. Invoke via npx so we
       # always get a recent enough CLI without mutating the runner's global
       # npm install.
-      - run: npx -y npm@latest publish --access public --provenance
+      #
+      # There is deliberately no auth preflight: trusted publishing mints its
+      # registry credentials inside `npm publish`, so nothing lands in .npmrc
+      # and `npm whoami` would 401 even on a run that publishes fine. Instead
+      # the 404 — which is what the registry returns when an unauthenticated
+      # PUT is refused — is decoded into something actionable.
+      - name: Publish to npm
+        id: publish
+        run: |
+          if npx -y npm@latest publish --access public --provenance; then
+            exit 0
+          fi
+          cat >&2 <<'EOF'
+          ::error::npm publish failed. A 404 on the PUT almost always means the trusted publisher is missing or mismatched — the registry refuses the anonymous write and reports it as "not found" rather than 403.
+          Check npmjs.com -> package -> Settings -> Trusted Publisher. All four must match this workflow exactly:
+            owner       trick77
+            repository  opencode-litellm-pricing
+            workflow    release.yaml     (filename only, and .yaml not .yml)
+            environment npm-publish      (must be set, not blank — this job declares it)
+          EOF
+          exit 1
       - uses: softprops/action-gh-release@v3
         with:
           generate_release_notes: true
+      # A tag that did not result in a published version is a trap: it cannot be
+      # re-pushed, so a retry needs manual tag surgery. Drop it — but only when
+      # the publish itself did not succeed. If the package went out and a later
+      # step failed, the tag must stay, because npm rejects a re-publish of the
+      # same version and the release has to be finished by hand.
+      - name: Drop the tag if nothing was published
+        if: failure() && steps.publish.outcome != 'success'
+        run: git push --delete origin "$GITHUB_REF_NAME"
