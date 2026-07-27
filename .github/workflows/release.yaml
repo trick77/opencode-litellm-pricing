@@ -19,10 +19,17 @@ jobs:
     environment: npm-publish
     steps:
       - uses: actions/checkout@v7
+      # No registry-url here, deliberately. setup-node always writes
+      # `//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}` into a temp
+      # .npmrc when it is set; with no NODE_AUTH_TOKEN — which is the whole
+      # point of trusted publishing — npm sees a configured (empty) credential,
+      # skips the OIDC exchange, and PUTs anonymously. The registry answers 404
+      # and the release looks like a missing trusted publisher.
+      # See actions/setup-node#1551. registry.npmjs.org is npm's default
+      # anyway, so nothing is lost by omitting it.
       - uses: actions/setup-node@v6
         with:
           node-version: 24
-          registry-url: https://registry.npmjs.org/
       - run: npm ci --ignore-scripts
       - run: npm run build
       - run: npm test
@@ -42,6 +49,24 @@ jobs:
             echo "::error::$name@$pkg is already published — npm rejects duplicate versions. Bump the version and tag again." >&2
             exit 1
           fi
+      # A real precondition check, unlike `npm whoami`: assert that the OIDC
+      # exchange can happen at all. It needs the id-token endpoint present, and
+      # it needs NO auth token configured — npm skips the exchange entirely if
+      # it finds one, which is exactly how setup-node's registry-url silently
+      # broke this.
+      - name: Verify the OIDC path is available
+        run: |
+          if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+            echo "::error::No OIDC token endpoint. The job needs id-token: write." >&2
+            exit 1
+          fi
+          for rc in "${NPM_CONFIG_USERCONFIG:-}" "$HOME/.npmrc" "$GITHUB_WORKSPACE/.npmrc"; do
+            [ -n "$rc" ] && [ -f "$rc" ] || continue
+            if grep -q '_authToken' "$rc"; then
+              echo "::error::$rc configures an _authToken. npm will skip the OIDC exchange and publish anonymously, which the registry rejects as a 404. Remove registry-url from setup-node (actions/setup-node#1551)." >&2
+              exit 1
+            fi
+          done
       # OIDC trusted publishing requires npm >= 11.5.1. Invoke via npx so we
       # always get a recent enough CLI without mutating the runner's global
       # npm install.
@@ -58,12 +83,14 @@ jobs:
             exit 0
           fi
           cat >&2 <<'EOF'
-          ::error::npm publish failed. A 404 on the PUT almost always means the trusted publisher is missing or mismatched — the registry refuses the anonymous write and reports it as "not found" rather than 403.
-          Check npmjs.com -> package -> Settings -> Trusted Publisher. All four must match this workflow exactly:
+          ::error::npm publish failed. A 404 on the PUT means the registry refused an unauthenticated write and reported it as "not found" rather than 403. Two causes, in order of likelihood:
+          1. npm never attempted the OIDC exchange, because something configured an auth token. The step above guards the known case (setup-node's registry-url, actions/setup-node#1551); check the log for an exchange attempt before blaming npm settings.
+          2. The trusted publisher is missing or mismatched. Check npmjs.com -> package -> Settings -> Trusted Publisher. All of these must match this workflow exactly:
             owner       trick77
             repository  opencode-litellm-pricing
             workflow    release.yaml     (filename only, and .yaml not .yml)
             environment npm-publish      (must be set, not blank — this job declares it)
+            actions     publish          (not stage-publish-only)
           EOF
           exit 1
       - uses: softprops/action-gh-release@v3
