@@ -19,17 +19,10 @@ jobs:
     environment: npm-publish
     steps:
       - uses: actions/checkout@v7
-      # No registry-url here, deliberately. setup-node always writes
-      # `//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}` into a temp
-      # .npmrc when it is set; with no NODE_AUTH_TOKEN — which is the whole
-      # point of trusted publishing — npm sees a configured (empty) credential,
-      # skips the OIDC exchange, and PUTs anonymously. The registry answers 404
-      # and the release looks like a missing trusted publisher.
-      # See actions/setup-node#1551. registry.npmjs.org is npm's default
-      # anyway, so nothing is lost by omitting it.
       - uses: actions/setup-node@v6
         with:
           node-version: 24
+          registry-url: https://registry.npmjs.org/
       - run: npm ci --ignore-scripts
       - run: npm run build
       - run: npm test
@@ -41,102 +34,10 @@ jobs:
             echo "tag $tag does not match package.json $pkg" >&2
             exit 1
           fi
-      - name: Verify this version is not already on npm
-        run: |
-          pkg=$(node -p "require('./package.json').version")
-          name=$(node -p "require('./package.json').name")
-          if npm view "$name@$pkg" version --silent >/dev/null 2>&1; then
-            echo "::error::$name@$pkg is already published — npm rejects duplicate versions. Bump the version and tag again." >&2
-            exit 1
-          fi
-      # A real precondition check, unlike `npm whoami`: assert that the OIDC
-      # exchange can happen at all. It needs the id-token endpoint present, and
-      # it needs NO auth token configured — npm skips the exchange entirely if
-      # it finds one, which is exactly how setup-node's registry-url silently
-      # broke this.
-      - name: Verify the OIDC path is available
-        run: |
-          if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
-            echo "::error::No OIDC token endpoint. The job needs id-token: write." >&2
-            exit 1
-          fi
-          for rc in "${NPM_CONFIG_USERCONFIG:-}" "$HOME/.npmrc" "$GITHUB_WORKSPACE/.npmrc"; do
-            [ -n "$rc" ] && [ -f "$rc" ] || continue
-            if grep -q '_authToken' "$rc"; then
-              echo "::error::$rc configures an _authToken. npm will skip the OIDC exchange and publish anonymously, which the registry rejects as a 404. Remove registry-url from setup-node (actions/setup-node#1551)." >&2
-              exit 1
-            fi
-          done
-      # Perform the exchange ourselves before handing over to npm. The CLI
-      # reports a rejected exchange as ENEEDAUTH or a 404 on the PUT, neither of
-      # which says which claim the registry disliked. Doing it directly surfaces
-      # the registry's own message, and prints the claims it matches against.
-      - name: Probe the npm OIDC exchange
-        run: |
-          name=$(node -p "require('./package.json').name")
-          echo "npm CLI: $(npx -y npm@latest --version)"
-
-          idtok=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=npm:registry.npmjs.org" \
-            | node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).value")
-
-          echo "--- claims the registry matches on ---"
-          node -e '
-            const c = JSON.parse(Buffer.from(process.argv[1].split(".")[1], "base64url"))
-            for (const k of ["iss","aud","sub","repository","repository_owner","workflow_ref","environment","ref","event_name"])
-              console.log(`  ${k}: ${c[k] ?? "<absent>"}`)
-          ' "$idtok"
-
-          echo "--- exchange response ---"
-          code=$(curl -sS -o /tmp/exchange.json -w '%{http_code}' -X POST \
-            -H "Authorization: Bearer $idtok" -H "Content-Type: application/json" \
-            "https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/$(node -p "encodeURIComponent(process.argv[1])" "$name")")
-          echo "  HTTP $code"
-          node -e '
-            const b = require("fs").readFileSync("/tmp/exchange.json","utf8")
-            let j; try { j = JSON.parse(b) } catch { console.log("  " + b.slice(0,400)); process.exit(0) }
-            // never print the token itself
-            if (j.token) { console.log("  token issued, length " + j.token.length); process.exit(0) }
-            console.log("  " + JSON.stringify(j).slice(0,400))
-          '
-          if [ "$code" != "200" ]; then
-            echo "::error::The registry refused the OIDC exchange (HTTP $code). Compare the claims above against the trusted publisher on npmjs.com — repository_owner, repository, workflow_ref and environment all have to match." >&2
-            exit 1
-          fi
-      # OIDC trusted publishing requires npm >= 11.5.1. Invoke via npx so we
-      # always get a recent enough CLI without mutating the runner's global
-      # npm install.
-      #
-      # There is deliberately no auth preflight: trusted publishing mints its
-      # registry credentials inside `npm publish`, so nothing lands in .npmrc
-      # and `npm whoami` would 401 even on a run that publishes fine. Instead
-      # the 404 — which is what the registry returns when an unauthenticated
-      # PUT is refused — is decoded into something actionable.
-      - name: Publish to npm
-        id: publish
-        run: |
-          if npx -y npm@latest publish --access public --provenance; then
-            exit 0
-          fi
-          cat >&2 <<'EOF'
-          ::error::npm publish failed. A 404 on the PUT means the registry refused an unauthenticated write and reported it as "not found" rather than 403. Two causes, in order of likelihood:
-          1. npm never attempted the OIDC exchange, because something configured an auth token. The step above guards the known case (setup-node's registry-url, actions/setup-node#1551); check the log for an exchange attempt before blaming npm settings.
-          2. The trusted publisher is missing or mismatched. Check npmjs.com -> package -> Settings -> Trusted Publisher. All of these must match this workflow exactly:
-            owner       trick77
-            repository  opencode-litellm-pricing
-            workflow    release.yaml     (filename only, and .yaml not .yml)
-            environment npm-publish      (must be set, not blank — this job declares it)
-            actions     publish          (not stage-publish-only)
-          EOF
-          exit 1
+      # OIDC trusted publishing requires npm >= 11.5.1. Invoke via npx
+      # so we always get a recent enough CLI without mutating the
+      # global npm install on the runner.
+      - run: npx -y npm@latest publish --access public --provenance
       - uses: softprops/action-gh-release@v3
         with:
           generate_release_notes: true
-      # A tag that did not result in a published version is a trap: it cannot be
-      # re-pushed, so a retry needs manual tag surgery. Drop it — but only when
-      # the publish itself did not succeed. If the package went out and a later
-      # step failed, the tag must stay, because npm rejects a re-publish of the
-      # same version and the release has to be finished by hand.
-      - name: Drop the tag if nothing was published
-        if: failure() && steps.publish.outcome != 'success'
-        run: git push --delete origin "$GITHUB_REF_NAME"
