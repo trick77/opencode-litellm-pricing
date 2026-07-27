@@ -34,10 +34,27 @@ jobs:
             echo "tag $tag does not match package.json $pkg" >&2
             exit 1
           fi
+      - name: Verify this version is not already on npm
+        run: |
+          name=$(node -p "require('./package.json').name")
+          pkg=$(node -p "require('./package.json').version")
+          if npm view "$name@$pkg" version --silent >/dev/null 2>&1; then
+            echo "::error::$name@$pkg is already published. npm rejects duplicate versions — bump and tag again." >&2
+            exit 1
+          fi
       # OIDC trusted publishing requires npm >= 11.5.1. Invoke via npx
       # so we always get a recent enough CLI without mutating the
       # global npm install on the runner.
-      - run: npx -y npm@latest publish --access public --provenance
+      - id: publish
+        run: npx -y npm@latest publish --access public --provenance
       - uses: softprops/action-gh-release@v3
         with:
           generate_release_notes: true
+      # A tag that produced no published version is a trap: it cannot be
+      # re-pushed, so every retry needs manual tag surgery. Drop it — but only
+      # when the publish itself did not succeed. If the package went out and a
+      # later step failed, the tag must stay, because npm will not accept the
+      # same version twice and that release has to be finished by hand.
+      - name: Drop the tag if nothing was published
+        if: failure() && steps.publish.outcome != 'success'
+        run: git push --delete origin "$GITHUB_REF_NAME"
