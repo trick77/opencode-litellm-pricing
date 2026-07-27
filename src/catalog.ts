@@ -39,12 +39,40 @@ interface Candidate {
   fields: CatalogFields
 }
 
+const CATALOG_TIMEOUT_MS = 2000
+
 let catalogPromise: Promise<Catalog | null> | undefined
 
 /** Load opencode's model catalog once per process (memoized). */
 export function getCatalog(client: Client): Promise<Catalog | null> {
   if (!catalogPromise) catalogPromise = load(client)
   return catalogPromise
+}
+
+/**
+ * Reject after CATALOG_TIMEOUT_MS so a hung client call can't block startup.
+ *
+ * `client.config.providers()` is served by the same process that is building
+ * the config, so calling it from inside the `config` hook is re-entrant: it
+ * cannot answer until the hook waiting on it returns. `preloadCatalog` avoids
+ * that by warming the cache before the hook runs; this bound means any future
+ * re-entrancy costs a second and degrades to "no pricing" instead of stalling.
+ */
+function withTimeout<T>(p: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  return Promise.race([
+    p,
+    new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error('catalog load timed out')), CATALOG_TIMEOUT_MS)
+    }),
+  ]).finally(() => {
+    if (timer) clearTimeout(timer)
+  }) as Promise<T>
+}
+
+/** Warm the catalog cache before the config hook runs. Never throws. */
+export async function preloadCatalog(client: Client): Promise<void> {
+  await getCatalog(client)
 }
 
 /** Clear the memoized catalog — used by tests. */
@@ -54,7 +82,7 @@ export function resetCatalogCache(): void {
 
 async function load(client: Client): Promise<Catalog | null> {
   try {
-    const result = (await client.config.providers({})) as unknown as {
+    const result = (await withTimeout(client.config.providers({}))) as unknown as {
       data?: { providers?: unknown }
       providers?: unknown
     }
