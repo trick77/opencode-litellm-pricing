@@ -106,13 +106,23 @@ creates `opencode-litellm-pricing` and auto-detects a local proxy.
 Tag-driven. Bump `version` in `package.json`, then push a matching tag:
 
 ```sh
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.1.1
+git push origin v0.1.1
 ```
 
 The `release` workflow verifies the tag matches `package.json`, then publishes
-to npm via OIDC trusted publishing and cuts a GitHub Release. (Configure the
-npm package's trusted publisher and a `npm-publish` GitHub environment first.)
+to npm via OIDC trusted publishing and cuts a GitHub Release.
+
+Prerequisites, one-time: an `npm-publish` GitHub environment, and a trusted
+publisher on the npm package pointing at owner `trick77`, repo
+`opencode-litellm-pricing`, workflow `release.yaml`, environment
+`npm-publish`. All four must match exactly or the publish fails with a
+misleading 404.
+
+No npm token is involved — authentication is OIDC, which is also what
+`--provenance` signs with. Note that trusted publishing cannot create a package
+that does not exist yet, which is why 0.1.0 was published by hand and carries no
+provenance attestation; every tagged release from 0.1.1 on does.
 
 ## License
 
