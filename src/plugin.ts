@@ -27,23 +27,20 @@
 //   }
 
 import type { Config, Plugin, PluginInput } from '@opencode-ai/plugin'
-import type { LiteLLMModelInfo } from './types.ts'
+import type { LiteLLMModel } from './types.ts'
 import type { CatalogFields } from './catalog.ts'
 import {
   autoDetectLiteLLM,
-  discoverLiteLLMModelInfo,
   discoverLiteLLMModels,
   normalizeBaseURL,
   resolveApiKey,
 } from './litellm-api.ts'
-import { applyCatalogFields, configModelFromCatalog, toConfigModel } from './build-config-model.ts'
-import { getCatalog } from './catalog.ts'
+import { configModelFromCatalog } from './build-config-model.ts'
+import { getCatalog, preloadCatalog } from './catalog.ts'
 
 // Default provider id — kept identical to the npm package name so the
 // `plugin` and `provider` keys in opencode.json read the same.
 const PROVIDER_ID = 'opencode-litellm-pricing'
-// Covers the parallel 15s models/model-info fetch, with headroom.
-const DISCOVERY_TIMEOUT_MS = 20000
 
 // Minimal mutable view of the parts of opencode's config we touch. Typing
 // the hook parameter as opencode's `Config` (below) and narrowing to this
@@ -91,6 +88,13 @@ function readCustomHeaders(options: Record<string, unknown>): Record<string, str
 }
 
 export const LiteLLMPricingPlugin: Plugin = async (input: PluginInput) => {
+  // Warm the models.dev catalog here, before the `config` hook runs. The
+  // catalog is read from opencode's own provider list, and that call cannot be
+  // answered while the config hook it would be called from is still running —
+  // doing it there hangs, which used to cost a 20s startup stall AND silently
+  // lose every price, since the swallowed failure left every model unmatched.
+  await preloadCatalog(input.client)
+
   return {
     config: async (rawConfig: Config) => {
       const config = rawConfig as unknown as MutableConfig
@@ -159,27 +163,25 @@ export const LiteLLMPricingPlugin: Plugin = async (input: PluginInput) => {
           const already = injectedModelIds.get(baseURL)
           if (already && [...already].every((id) => models[id])) return
 
-          // No standalone health probe: /v1/models below is the same request
-          // a probe would make, and its failure already means "offline".
-          const [modelsResult, infoResult] = await Promise.allSettled([
-            discoverLiteLLMModels(baseURL, apiKey, customHeaders),
-            discoverLiteLLMModelInfo(baseURL, apiKey, customHeaders),
-          ])
-
-          if (modelsResult.status === 'rejected') {
-            const err = modelsResult.reason
+          // Discovery only. Pricing is never requested from the proxy:
+          // /v1/model/info is admin-gated, so it fails for exactly the
+          // developer keys most people run, and its numbers depend on the
+          // deployment having base_model set correctly — an easy thing to get
+          // wrong, which then bills $0. Matching the model name against the
+          // catalog gives the same answer for every key, with one code path.
+          //
+          // No standalone health probe: /v1/models is the same request a probe
+          // would make, and its failure already means "offline".
+          let discovered: LiteLLMModel[]
+          try {
+            discovered = await discoverLiteLLMModels(baseURL, apiKey, customHeaders)
+          } catch (err) {
             console.warn(
               `[litellm-pricing] Model discovery failed for provider "${providerId}" at ${baseURL}:`,
               err instanceof Error ? err.message : String(err),
             )
             return
           }
-
-          const discovered = modelsResult.value
-          // /v1/model/info is admin-gated; a developer key gets null here and
-          // the models.dev catalog supplies cost/limits instead.
-          const infoByName: Map<string, LiteLLMModelInfo> | null =
-            infoResult.status === 'fulfilled' ? infoResult.value : null
 
           if (discovered.length === 0) {
             console.warn(
@@ -190,7 +192,6 @@ export const LiteLLMPricingPlugin: Plugin = async (input: PluginInput) => {
 
           let added = 0
           let priced = 0
-          let viaCatalog = 0
           let skipped = 0
           let wildcards = 0
           for (const model of discovered) {
@@ -205,28 +206,11 @@ export const LiteLLMPricingPlugin: Plugin = async (input: PluginInput) => {
             // Never overwrite user-curated entries.
             if (models[model.id]) continue
 
-            const info = infoByName?.get(model.id)
-            let entry: Record<string, unknown> | null
-            let filledFromCatalog = false
-
-            if (info) {
-              // Admin path: LiteLLM's own resolved data.
-              entry = toConfigModel(model, info)
-              // Top up anything LiteLLM didn't price/size from the catalog.
-              if (entry && (!entry.cost || !entry.limit)) {
-                const fields = await resolveCatalog(model.id)
-                if (fields) {
-                  const hadCost = entry.cost != null
-                  applyCatalogFields(entry, fields)
-                  if (!hadCost && entry.cost) filledFromCatalog = true
-                }
-              }
-            } else {
-              // Developer-key path: name-match against the models.dev catalog.
-              const fields = await resolveCatalog(model.id)
-              entry = configModelFromCatalog(model, fields)
-              if (entry?.cost) filledFromCatalog = true
-            }
+            // Name-match against the models.dev catalog: `ai-gateway-gpt-5.4`
+            // resolves to `gpt-5.4` (longest match wins, so `…-mini` beats the
+            // base model).
+            const fields = await resolveCatalog(model.id)
+            const entry = configModelFromCatalog(model, fields)
 
             if (!entry) {
               skipped++
@@ -235,7 +219,6 @@ export const LiteLLMPricingPlugin: Plugin = async (input: PluginInput) => {
             models[model.id] = entry
             added++
             if (entry.cost) priced++
-            if (filledFromCatalog) viaCatalog++
           }
 
           injectedModelIds.set(baseURL, new Set(Object.keys(models)))
@@ -243,22 +226,17 @@ export const LiteLLMPricingPlugin: Plugin = async (input: PluginInput) => {
           console.log(
             `[litellm-pricing] provider "${providerId}": ${added} model(s) added` +
               ` (${priced} with pricing` +
-              (viaCatalog > 0 ? `, ${viaCatalog} via models.dev fallback` : '') +
               (skipped > 0 ? `, ${skipped} non-chat hidden` : '') +
               (wildcards > 0 ? `, ${wildcards} wildcard ignored` : '') +
               `) from ${baseURL}`,
           )
         }
 
-        let timer: ReturnType<typeof setTimeout> | undefined
-        await Promise.race([
-          work(),
-          new Promise<void>((resolve) => {
-            timer = setTimeout(resolve, DISCOVERY_TIMEOUT_MS)
-          }),
-        ]).finally(() => {
-          if (timer) clearTimeout(timer)
-        })
+        // No outer race: every await inside `work()` is individually bounded
+        // (AbortSignal.timeout on the HTTP calls, CATALOG_TIMEOUT_MS on the
+        // catalog). A blanket timeout here only ever hid an unbounded call
+        // while still charging the user its full duration at startup.
+        await work()
       }
     },
   }
