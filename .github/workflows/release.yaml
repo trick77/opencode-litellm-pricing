@@ -67,6 +67,42 @@ jobs:
               exit 1
             fi
           done
+      # Perform the exchange ourselves before handing over to npm. The CLI
+      # reports a rejected exchange as ENEEDAUTH or a 404 on the PUT, neither of
+      # which says which claim the registry disliked. Doing it directly surfaces
+      # the registry's own message, and prints the claims it matches against.
+      - name: Probe the npm OIDC exchange
+        run: |
+          name=$(node -p "require('./package.json').name")
+          echo "npm CLI: $(npx -y npm@latest --version)"
+
+          idtok=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=npm:registry.npmjs.org" \
+            | node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).value")
+
+          echo "--- claims the registry matches on ---"
+          node -e '
+            const c = JSON.parse(Buffer.from(process.argv[1].split(".")[1], "base64url"))
+            for (const k of ["iss","aud","sub","repository","repository_owner","workflow_ref","environment","ref","event_name"])
+              console.log(`  ${k}: ${c[k] ?? "<absent>"}`)
+          ' "$idtok"
+
+          echo "--- exchange response ---"
+          code=$(curl -sS -o /tmp/exchange.json -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer $idtok" -H "Content-Type: application/json" \
+            "https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/$(node -p "encodeURIComponent(process.argv[1])" "$name")")
+          echo "  HTTP $code"
+          node -e '
+            const b = require("fs").readFileSync("/tmp/exchange.json","utf8")
+            let j; try { j = JSON.parse(b) } catch { console.log("  " + b.slice(0,400)); process.exit(0) }
+            // never print the token itself
+            if (j.token) { console.log("  token issued, length " + j.token.length); process.exit(0) }
+            console.log("  " + JSON.stringify(j).slice(0,400))
+          '
+          if [ "$code" != "200" ]; then
+            echo "::error::The registry refused the OIDC exchange (HTTP $code). Compare the claims above against the trusted publisher on npmjs.com — repository_owner, repository, workflow_ref and environment all have to match." >&2
+            exit 1
+          fi
       # OIDC trusted publishing requires npm >= 11.5.1. Invoke via npx so we
       # always get a recent enough CLI without mutating the runner's global
       # npm install.
