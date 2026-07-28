@@ -18,9 +18,9 @@ export interface LiteLLMModel {
   /** LiteLLM-specific: underlying provider (e.g. "openai", "azure"). */
   litellm_provider?: string
   /**
-   * LiteLLM `mode` (chat, embedding, image_generation, audio_transcription,
-   * audio_speech, rerank, moderation, responses, ...). Omitted by
-   * `/v1/models` for database-defined models; present via `/v1/model/info`.
+   * LiteLLM `mode` — see {@link LITELLM_CHAT_MODES} for the documented values.
+   * NOT returned by `/v1/models`: its documented response shape is
+   * `{id, object, created, owned_by}`. Present via `/v1/model/info`.
    */
   mode?: string
   max_tokens?: number
@@ -92,6 +92,48 @@ export interface LiteLLMModelInfoEntry {
 export interface LiteLLMModelInfoResponse {
   data?: LiteLLMModelInfoEntry[]
 }
+
+/**
+ * A single entry returned by LiteLLM's `/v1/model_group/info` endpoint.
+ *
+ * Keyed by `model_group`, which is the same string `/v1/models` reports as a
+ * model `id` — so unlike `/v1/model/info` no alias resolution is needed. This
+ * is the plugin's source for `mode` (what kind of model it is) and for the
+ * capability flags. It carries no cost fields, so pricing stays sourced from
+ * the models.dev catalog alone.
+ *
+ * `mode` may legitimately be `null` — LiteLLM emits that for models it has no
+ * price-map entry for — which is why classification falls back to the id
+ * heuristics per model rather than all-or-nothing.
+ */
+export interface LiteLLMModelGroupInfo {
+  model_group: string
+  providers?: string[]
+  mode?: string | null
+  max_input_tokens?: number | null
+  max_output_tokens?: number | null
+  supports_function_calling?: boolean
+  supports_vision?: boolean
+  supports_reasoning?: boolean
+  supports_pdf_input?: boolean
+  supports_audio_input?: boolean
+}
+
+export interface LiteLLMModelGroupResponse {
+  data?: LiteLLMModelGroupInfo[]
+}
+
+/**
+ * The `mode` values LiteLLM itself documents, from the `sample_spec` entry in
+ * `model_prices_and_context_window.json`: chat, completion, embedding,
+ * image_generation, audio_transcription, audio_speech, moderation, rerank,
+ * search. `responses` is not in that list but is emitted by some deployments,
+ * so it is accepted as a chat mode too.
+ *
+ * Only these three are usable in opencode's picker; everything else is a
+ * non-chat endpoint.
+ */
+export const LITELLM_CHAT_MODES: ReadonlySet<string> = new Set(['chat', 'completion', 'responses'])
 
 export type ModelType = 'chat' | 'embedding' | 'image' | 'audio' | 'unknown'
 

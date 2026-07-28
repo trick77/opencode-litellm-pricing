@@ -23,7 +23,7 @@ Add the plugin and a LiteLLM provider to your `opencode.json`:
       "npm": "@ai-sdk/openai-compatible",
       "name": "LiteLLM (proxy)",
       "options": {
-        "baseURL": "http://localhost:4000/v1",
+        "baseURL": "https://litellm.example.com/v1",
         "apiKey": "{env:LITELLM_API_KEY}"
       }
     }
@@ -31,9 +31,9 @@ Add the plugin and a LiteLLM provider to your `opencode.json`:
 }
 ```
 
-The proxy key is read from `options.apiKey`, else `$LITELLM_API_KEY` /
-`$LITELLM_MASTER_KEY`. With no `baseURL`, the plugin auto-detects a local
-proxy on ports 4000 / 8000 / 8080.
+`options.baseURL` is **required** — the plugin talks to that URL and nothing
+else. A provider without one is skipped with a warning. The proxy key is read
+from `options.apiKey`, else `$LITELLM_API_KEY` / `$LITELLM_MASTER_KEY`.
 
 ## How pricing works
 
@@ -54,9 +54,8 @@ name: `ai-gateway-gpt-5.4` → `gpt-5.4`, longest-match so `…-mini` beats the
 base, `azure` preferred over `openai`. These are public list prices, not your
 negotiated rates.
 
-**Why not read LiteLLM's own numbers?** `/v1/model/info` carries them, but it is
-admin-gated — so it fails for exactly the developer keys most people run — and
-its figures are only correct when the deployment has `model_info.base_model` set
+**Why not read LiteLLM's own numbers?** `/v1/model/info` carries them, but its
+figures are only correct when the deployment has `model_info.base_model` set
 properly. Get that wrong and LiteLLM itself bills `$0`, which the plugin would
 faithfully pass on. Name-matching is the same answer for every key, and it can't
 silently report zero.
@@ -66,8 +65,28 @@ from the catalog's `experimentalOver200K`.
 
 If no catalog match is found, the `cost` block is **omitted** rather than shown
 wrong. Existing entries you've hand-curated under `provider.*.models` are never
-overwritten. Non-chat models — embedding / image / audio, classified by name —
-and wildcard (`*`) entries are skipped.
+overwritten. Wildcard (`*`) entries are skipped — they are access rules, not
+callable models.
+
+## Non-chat models
+
+Embedding, image, audio, rerank and moderation models are filtered out of the
+picker.
+
+`/v1/models` says which models your key can see, but not what kind each one is
+— its response is just `{id, object, created, owned_by}`. LiteLLM keeps that in
+a `mode` field, so the plugin also reads `/v1/model_group/info`, which returns
+`mode` plus the capability flags keyed by the same id. Anything whose mode
+isn't `chat` / `completion` / `responses` is left out, and the limits and
+capability flags it reports fill in what models.dev doesn't cover.
+
+That call is best-effort, with a 3-second budget. If your proxy doesn't allow
+it, discovery carries on and models are classified by **name** instead —
+`*-embedding-*`, `*rerank*`, `dall-e-*` and so on. The startup log tells you
+which path ran. The name patterns are deliberately narrow, because a false
+positive hides a model you can actually use: `amazon.nova-pro-v1` and
+`gpt-4o-audio-preview` stay in the picker. The cost of that caution is that an
+oddly-named non-chat model can slip through when the name is all we have.
 
 ## Provider matching
 
@@ -75,8 +94,8 @@ The plugin enriches any provider whose id is `opencode-litellm-pricing` (the
 default, matching the package name) or `litellm`, starts with `litellm-` /
 `litellm_`, or whose `options` sets `litellm: true` (or `litellmCompatible` /
 `litellm-compatible`). Extra auth headers (e.g. Cloudflare Access) can be
-passed via `options.customHeaders`. With no matching provider at all, it
-creates `opencode-litellm-pricing` and auto-detects a local proxy.
+passed via `options.customHeaders`. With no matching provider in your config,
+the plugin does nothing.
 
 ## Requirements
 

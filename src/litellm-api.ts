@@ -1,21 +1,33 @@
-// LiteLLM proxy HTTP client: health check, model discovery, and per-model
+// LiteLLM proxy HTTP client: model discovery from /v1/models, and per-model
 // metadata (including cost) from /v1/model/info. The model-info reader
 // carries cost fields through and falls back to litellm_params for
 // cost/capability keys set there.
+//
+// Every call targets the caller-supplied base URL and nothing else. There is
+// deliberately no default URL and no port auto-detection: an unconfigured
+// provider is an error to report, not a reason to go probing the local
+// machine.
 
 import type {
   LiteLLMModel,
+  LiteLLMModelGroupInfo,
+  LiteLLMModelGroupResponse,
   LiteLLMModelInfo,
   LiteLLMModelInfoEntry,
   LiteLLMModelInfoResponse,
   LiteLLMModelsResponse,
 } from './types.ts'
 
-export const DEFAULT_LITELLM_URL = 'http://localhost:4000'
 const MODELS_ENDPOINT = '/v1/models'
 const MODEL_INFO_ENDPOINT = '/v1/model/info'
-const HEALTH_TIMEOUT_MS = 3000
+const MODEL_GROUP_INFO_ENDPOINT = '/v1/model_group/info'
 const FETCH_TIMEOUT_MS = 15000
+/**
+ * Tight budget for the capability lookup. It is an optional enrichment on top
+ * of /v1/models, so a slow or hanging proxy costs a few seconds at startup,
+ * never the full FETCH_TIMEOUT_MS.
+ */
+const METADATA_TIMEOUT_MS = 3000
 
 /** Numeric keys we also accept off `litellm_params` when absent in model_info. */
 const NUMERIC_INFO_KEYS = [
@@ -45,7 +57,7 @@ const CAPABILITY_FLAGS = [
  * Normalise a base URL so the rest of the plugin can rely on a predictable
  * shape (no trailing slash, no `/v1` suffix).
  */
-export function normalizeBaseURL(baseURL: string = DEFAULT_LITELLM_URL): string {
+export function normalizeBaseURL(baseURL: string): string {
   let normalized = baseURL.replace(/\/+$/, '')
   if (normalized.endsWith('/v1')) {
     normalized = normalized.slice(0, -3)
@@ -78,29 +90,9 @@ function buildHeaders(
   return headers
 }
 
-/** Lightweight ping to see whether a LiteLLM server is reachable. */
-export async function checkLiteLLMHealth(
-  baseURL: string = DEFAULT_LITELLM_URL,
-  apiKey?: string,
-  customHeaders?: Record<string, string>,
-): Promise<boolean> {
-  try {
-    const response = await fetch(buildAPIURL(baseURL), {
-      method: 'GET',
-      headers: buildHeaders(apiKey, customHeaders),
-      signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
-    })
-    // A 401 means the server is alive but our credentials are wrong — treat
-    // that as unhealthy so the user is prompted to set LITELLM_API_KEY.
-    return response.ok
-  } catch {
-    return false
-  }
-}
-
 /** Discover all models exposed by a LiteLLM proxy via /v1/models. */
 export async function discoverLiteLLMModels(
-  baseURL: string = DEFAULT_LITELLM_URL,
+  baseURL: string,
   apiKey?: string,
   customHeaders?: Record<string, string>,
 ): Promise<LiteLLMModel[]> {
@@ -117,12 +109,60 @@ export async function discoverLiteLLMModels(
 }
 
 /**
+ * Fetch per-model-group capabilities from /v1/model_group/info, keyed by
+ * `model_group`.
+ *
+ * This is where `mode` comes from — the field that says whether a model is a
+ * chat model, an embedding model, a reranker, and so on. /v1/models does not
+ * carry it (its response is just id/object/created/owned_by), so without this
+ * the non-chat filter can only guess from the model id.
+ *
+ * Preferred over /v1/model/info because `model_group` IS the `model_name` that
+ * /v1/models reports, so no alias resolution is needed, and because the
+ * response carries no cost fields — pricing stays sourced from the models.dev
+ * catalog alone, one code path.
+ *
+ * Callers MUST treat failure as non-fatal. Whether this endpoint needs an
+ * elevated key is not settled — LiteLLM's own docs describe it both as a
+ * discovery endpoint alongside /v1/models and as needing management access —
+ * so discovery has to keep working without it.
+ */
+export async function discoverLiteLLMModelGroups(
+  baseURL: string,
+  apiKey?: string,
+  customHeaders?: Record<string, string>,
+): Promise<Map<string, LiteLLMModelGroupInfo>> {
+  const response = await fetch(buildAPIURL(baseURL, MODEL_GROUP_INFO_ENDPOINT), {
+    method: 'GET',
+    headers: buildHeaders(apiKey, customHeaders),
+    signal: AbortSignal.timeout(METADATA_TIMEOUT_MS),
+  })
+  if (!response.ok) {
+    throw new Error(`LiteLLM responded with HTTP ${response.status} ${response.statusText}`)
+  }
+
+  const data = (await response.json()) as LiteLLMModelGroupResponse
+  const byGroup = new Map<string, LiteLLMModelGroupInfo>()
+  for (const group of data.data ?? []) {
+    // First entry wins, mirroring the public-name-wins rule in the reader below.
+    if (group?.model_group && !byGroup.has(group.model_group)) {
+      byGroup.set(group.model_group, group)
+    }
+  }
+  return byGroup
+}
+
+/**
  * Fetch per-model metadata (mode, token limits, capability flags, and cost)
  * from /v1/model/info, keyed by every alias LiteLLM may use for a model so
  * the `/v1/models` id reliably matches.
+ *
+ * Unused by the live path: `discoverLiteLLMModelGroups` covers the same need
+ * with simpler keying and no cost fields. Kept as the only reader for the
+ * litellm_params cost/capability fallback.
  */
 export async function discoverLiteLLMModelInfo(
-  baseURL: string = DEFAULT_LITELLM_URL,
+  baseURL: string,
   apiKey?: string,
   customHeaders?: Record<string, string>,
 ): Promise<Map<string, LiteLLMModelInfo>> {
@@ -175,53 +215,4 @@ export async function discoverLiteLLMModelInfo(
     }
   }
   return infoByName
-}
-
-/**
- * Confirm a server is actually LiteLLM, not just any OpenAI-compatible
- * server (vLLM, LM Studio, …) that answers /v1/models. `/v1/model/info` is
- * LiteLLM-specific: a non-LiteLLM server 404s it, while LiteLLM returns 200
- * or an auth error (401/403) — anything other than 404 marks it as LiteLLM.
- */
-async function looksLikeLiteLLM(
-  baseURL: string,
-  apiKey?: string,
-  customHeaders?: Record<string, string>,
-): Promise<boolean> {
-  try {
-    const response = await fetch(buildAPIURL(baseURL, MODEL_INFO_ENDPOINT), {
-      method: 'GET',
-      headers: buildHeaders(apiKey, customHeaders),
-      signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
-    })
-    return response.status !== 404
-  } catch {
-    return false
-  }
-}
-
-/**
- * Try the common ports a LiteLLM proxy is started on (4000 default; 8000 /
- * 8080 also common), concurrently, and return the first that is both
- * reachable and identifiably LiteLLM. Concurrency keeps a blackholed port
- * from serially stalling startup; the LiteLLM marker keeps a stray
- * OpenAI-compatible server from binding as a phantom provider.
- */
-export async function autoDetectLiteLLM(
-  apiKey?: string,
-  customHeaders?: Record<string, string>,
-): Promise<string | null> {
-  const probes = [4000, 8000, 8080].map((port) => {
-    const baseURL = `http://localhost:${port}`
-    return (async () => {
-      const healthy = await checkLiteLLMHealth(baseURL, apiKey, customHeaders)
-      if (healthy && (await looksLikeLiteLLM(baseURL, apiKey, customHeaders))) return baseURL
-      throw new Error(`not LiteLLM at ${baseURL}`)
-    })()
-  })
-  try {
-    return await Promise.any(probes)
-  } catch {
-    return null
-  }
 }

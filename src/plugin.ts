@@ -5,10 +5,13 @@
 // per-model `cost` block, so opencode's cost display matches what LiteLLM
 // bills.
 //
-// Cost is sourced with a dual path, auto-detecting the key:
-//   • admin/master key → LiteLLM's own /v1/model/info (bill-exact)
-//   • developer key (that endpoint is admin-gated) → opencode's models.dev
-//     catalog, matched to the model by name (public list prices)
+// Cost comes from one source: opencode's own models.dev catalog, matched to
+// each model by name (public list prices). The proxy is asked what models the
+// key can see (/v1/models) and what kind of model each one is
+// (/v1/model_group/info) — never for pricing.
+//
+// `options.baseURL` is required. The plugin talks to that URL and nothing
+// else: there is no default and no port auto-detection.
 //
 // Configure in opencode.json:
 //
@@ -19,7 +22,7 @@
 //         "npm": "@ai-sdk/openai-compatible",
 //         "name": "LiteLLM (proxy)",
 //         "options": {
-//           "baseURL": "http://localhost:4000/v1",
+//           "baseURL": "https://litellm.example.com/v1",
 //           "apiKey": "{env:LITELLM_API_KEY}"
 //         }
 //       }
@@ -27,15 +30,15 @@
 //   }
 
 import type { Config, Plugin, PluginInput } from '@opencode-ai/plugin'
-import type { LiteLLMModel } from './types.ts'
+import type { LiteLLMModel, LiteLLMModelGroupInfo } from './types.ts'
 import type { CatalogFields } from './catalog.ts'
 import {
-  autoDetectLiteLLM,
+  discoverLiteLLMModelGroups,
   discoverLiteLLMModels,
   normalizeBaseURL,
   resolveApiKey,
 } from './litellm-api.ts'
-import { configModelFromCatalog } from './build-config-model.ts'
+import { configModelFromCatalog, enrichModel, groupInfoToModelInfo } from './build-config-model.ts'
 import { getCatalog, preloadCatalog } from './catalog.ts'
 
 // Default provider id — kept identical to the npm package name so the
@@ -107,8 +110,9 @@ export const LiteLLMPricingPlugin: Plugin = async (input: PluginInput) => {
         return catalog?.resolve(name) ?? null
       }
 
-      // Collect matching providers; fall back to a default entry for
-      // zero-config auto-detection.
+      // Collect matching providers. No synthesized fallback entry: without a
+      // configured baseURL there is nothing to discover, so inventing a
+      // provider could only ever produce a warning and an empty model list.
       const matched: Array<{ id: string; provider: MutableProvider }> = []
       for (const id of Object.keys(providers)) {
         const provider = providers[id]
@@ -116,17 +120,6 @@ export const LiteLLMPricingPlugin: Plugin = async (input: PluginInput) => {
           const options = (provider.options ?? {}) as Record<string, unknown>
           if (isLiteLLMProvider(id, options)) matched.push({ id, provider })
         }
-      }
-      if (matched.length === 0) {
-        matched.push({
-          id: PROVIDER_ID,
-          provider: providers[PROVIDER_ID] ?? {
-            npm: '@ai-sdk/openai-compatible',
-            name: 'LiteLLM (proxy)',
-            options: {},
-            models: {},
-          },
-        })
       }
 
       for (const { id: providerId, provider } of matched) {
@@ -137,16 +130,15 @@ export const LiteLLMPricingPlugin: Plugin = async (input: PluginInput) => {
         const apiKey = resolveApiKey(configuredKey)
         const customHeaders = readCustomHeaders(options)
 
-        const baseURL = configuredBase
-          ? normalizeBaseURL(configuredBase)
-          : await autoDetectLiteLLM(apiKey, customHeaders)
-
-        if (!baseURL) {
+        // The configured URL is the only URL. Nothing is guessed, nothing is
+        // probed locally.
+        if (!configuredBase) {
           console.warn(
-            `[litellm-pricing] No LiteLLM proxy found for provider "${providerId}". Set options.baseURL or start LiteLLM on port 4000/8000/8080.`,
+            `[litellm-pricing] provider "${providerId}" has no options.baseURL — set it to your LiteLLM URL; nothing was injected.`,
           )
           continue
         }
+        const baseURL = normalizeBaseURL(configuredBase)
 
         // Ensure the provider entry exists and is minimally wired.
         if (!providers[providerId]) providers[providerId] = provider
@@ -163,12 +155,11 @@ export const LiteLLMPricingPlugin: Plugin = async (input: PluginInput) => {
           const already = injectedModelIds.get(baseURL)
           if (already && [...already].every((id) => models[id])) return
 
-          // Discovery only. Pricing is never requested from the proxy:
-          // /v1/model/info is admin-gated, so it fails for exactly the
-          // developer keys most people run, and its numbers depend on the
-          // deployment having base_model set correctly — an easy thing to get
-          // wrong, which then bills $0. Matching the model name against the
-          // catalog gives the same answer for every key, with one code path.
+          // Pricing is never requested from the proxy. LiteLLM's per-model
+          // numbers depend on the deployment having base_model set correctly —
+          // an easy thing to get wrong, which then bills $0. Matching the model
+          // name against the catalog gives the same answer for every key, with
+          // one code path.
           //
           // No standalone health probe: /v1/models is the same request a probe
           // would make, and its failure already means "offline".
@@ -190,6 +181,19 @@ export const LiteLLMPricingPlugin: Plugin = async (input: PluginInput) => {
             return
           }
 
+          // What kind of model each one is. /v1/models carries no `mode`, so
+          // without this the non-chat filter can only guess from the id.
+          // Strictly best-effort — it is not settled whether this endpoint
+          // needs an elevated key, so any failure (refused, missing, slow)
+          // falls back to the id heuristics rather than blocking or dropping
+          // models.
+          let groups: Map<string, LiteLLMModelGroupInfo> | null = null
+          try {
+            groups = await discoverLiteLLMModelGroups(baseURL, apiKey, customHeaders)
+          } catch {
+            groups = null
+          }
+
           let added = 0
           let priced = 0
           let skipped = 0
@@ -206,11 +210,16 @@ export const LiteLLMPricingPlugin: Plugin = async (input: PluginInput) => {
             // Never overwrite user-curated entries.
             if (models[model.id]) continue
 
+            // /v1/model_group/info is keyed by model_group, which is exactly
+            // the id /v1/models reports — no alias resolution needed.
+            const group = groups?.get(model.id)
+            const enriched = group ? enrichModel(model, groupInfoToModelInfo(group)) : model
+
             // Name-match against the models.dev catalog: `ai-gateway-gpt-5.4`
             // resolves to `gpt-5.4` (longest match wins, so `…-mini` beats the
             // base model).
             const fields = await resolveCatalog(model.id)
-            const entry = configModelFromCatalog(model, fields)
+            const entry = configModelFromCatalog(enriched, fields)
 
             if (!entry) {
               skipped++
@@ -228,7 +237,10 @@ export const LiteLLMPricingPlugin: Plugin = async (input: PluginInput) => {
               ` (${priced} with pricing` +
               (skipped > 0 ? `, ${skipped} non-chat hidden` : '') +
               (wildcards > 0 ? `, ${wildcards} wildcard ignored` : '') +
-              `) from ${baseURL}`,
+              `) from ${baseURL}` +
+              // Say which signal did the filtering, so an unexpected model in
+              // the picker is diagnosable without instrumenting the plugin.
+              (groups ? '' : ' [no /v1/model_group/info — non-chat filtered by name only]'),
           )
         }
 

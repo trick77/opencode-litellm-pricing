@@ -2,7 +2,13 @@
 // provider.*.models.* in opencode.json) from a discovered LiteLLM model,
 // including the per-model `cost` block — the reason this plugin exists.
 
-import type { CostBlock, CostTier, LiteLLMModel, LiteLLMModelInfo } from './types.ts'
+import type {
+  CostBlock,
+  CostTier,
+  LiteLLMModel,
+  LiteLLMModelGroupInfo,
+  LiteLLMModelInfo,
+} from './types.ts'
 import type { CatalogFields } from './catalog.ts'
 import { categorizeModel, formatModelName } from './format-model-name.ts'
 
@@ -75,6 +81,32 @@ function buildTier(
 }
 
 /**
+ * Adapt a /v1/model_group/info entry to the LiteLLMModelInfo shape so it can
+ * go through the same `enrichModel` overlay.
+ *
+ * `max_tokens` is deliberately NOT mapped: the group response exposes
+ * `max_input_tokens`/`max_output_tokens`, and the `max_tokens` some pages show
+ * is ambiguous there. Leaving it undefined keeps the
+ * `max_output_tokens ?? max_tokens` fallback honest. Cost is not mapped
+ * either — the group endpoint carries none, and pricing comes from models.dev.
+ *
+ * `null` is normalised to `undefined` so the `??` chains in `enrichModel`
+ * treat a missing value as missing.
+ */
+export function groupInfoToModelInfo(group: LiteLLMModelGroupInfo): LiteLLMModelInfo {
+  return {
+    mode: group.mode ?? undefined,
+    max_input_tokens: group.max_input_tokens ?? undefined,
+    max_output_tokens: group.max_output_tokens ?? undefined,
+    supports_function_calling: group.supports_function_calling,
+    supports_vision: group.supports_vision,
+    supports_reasoning: group.supports_reasoning,
+    supports_pdf_input: group.supports_pdf_input,
+    supports_audio_input: group.supports_audio_input,
+  }
+}
+
+/**
  * Overlay /v1/model/info metadata onto a /v1/models entry (the lean entry
  * wins; the info block fills gaps — notably `mode`, token limits, and
  * capability flags, which /v1/models omits for database-defined models).
@@ -137,11 +169,15 @@ export function toConfigModel(
 }
 
 /**
- * Dev-key path: build a config entry from the models.dev catalog when
- * LiteLLM's /v1/model/info is unavailable (admin-gated). There is no `mode`
- * to classify on here, so filter non-chat models by the name heuristic;
- * `fields` (matched from the catalog) supply cost/limit/capabilities and may
- * be null when nothing matched (the model is still injected, just bare).
+ * The live path: build a config entry for a discovered model.
+ *
+ * `model` should already carry whatever `/v1/model_group/info` returned, so
+ * `categorizeModel` can classify on LiteLLM's own `mode` and fall back to the
+ * id heuristic only when there isn't one.
+ *
+ * LiteLLM's limits and capability flags win where present; `fields` (matched
+ * from the models.dev catalog) supply cost and fill the remaining gaps, and
+ * may be null when nothing matched — the model is still injected, just barer.
  */
 export function configModelFromCatalog(
   model: LiteLLMModel,
@@ -150,6 +186,24 @@ export function configModelFromCatalog(
   if (categorizeModel(model) !== 'chat') return null
 
   const entry: Record<string, unknown> = { name: formatModelName(model) }
+
+  // Same LiteLLM semantics as toConfigModel: max_input_tokens is the context
+  // window, max_output_tokens the completion cap (max_tokens its legacy
+  // alias). Emit a limit only when both are known, never a bogus 0 window.
+  const context = model.max_input_tokens
+  const output = model.max_output_tokens ?? model.max_tokens
+  if (context != null && output != null) entry.limit = { context, output }
+
+  if (model.supports_function_calling) entry.tool_call = true
+  if (model.supports_reasoning) entry.reasoning = true
+  if (model.supports_vision) entry.attachment = true
+
+  const input: Array<'text' | 'image' | 'pdf' | 'audio'> = ['text']
+  if (model.supports_vision) input.push('image')
+  if (model.supports_pdf_input) input.push('pdf')
+  if (model.supports_audio_input) input.push('audio')
+  if (input.length > 1) entry.modalities = { input, output: ['text'] }
+
   if (fields) applyCatalogFields(entry, fields)
   return entry
 }
