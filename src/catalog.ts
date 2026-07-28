@@ -1,11 +1,13 @@
-// Dev-key fallback source.
+// The pricing source.
 //
-// LiteLLM's /v1/model/info (which carries cost/limits/capabilities) is
-// admin-gated, so a normal developer key can't read it. When that's the
-// case we source those fields from opencode's own models.dev-backed catalog
-// instead — fetched via the plugin client (no external network, always the
-// catalog version opencode itself runs) — matched to the LiteLLM model by
-// name.
+// Cost is taken from opencode's own models.dev-backed catalog — fetched via
+// the plugin client (no external network, always the catalog version opencode
+// itself runs) — matched to the LiteLLM model by name.
+//
+// LiteLLM's own per-model prices are deliberately not used: they depend on the
+// deployment having base_model set correctly, which is easy to get wrong and
+// then silently bills $0. Name-matching gives the same answer for every key,
+// through one code path.
 
 import type { PluginInput } from '@opencode-ai/plugin'
 import type { CostBlock, CostTier } from './types.ts'

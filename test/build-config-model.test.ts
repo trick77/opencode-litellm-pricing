@@ -124,6 +124,21 @@ test('configModelFromCatalog: filters non-chat by name, applies catalog fields t
   assert.equal(entry.tool_call, true)
 })
 
+test('catalog modalities are unioned with LiteLLM flags, never shrunk by them', () => {
+  // LiteLLM's group info reports vision only; models.dev also knows pdf. The
+  // narrower proxy answer must not drop pdf from the injected entry.
+  const model = {
+    id: 'bedrock-claude',
+    object: 'model',
+    mode: 'chat',
+    supports_vision: true,
+  } as LiteLLMModel
+  const entry = configModelFromCatalog(model, {
+    modalities: { input: ['text', 'image', 'pdf'], output: ['text'] },
+  })!
+  assert.deepEqual(entry.modalities, { input: ['text', 'image', 'pdf'], output: ['text'] })
+})
+
 test('chat model carries name, limit, cost, and capability flags', () => {
   const model: LiteLLMModel = {
     id: 'ai-gateway-gpt-5.4',

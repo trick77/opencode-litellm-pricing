@@ -16,12 +16,11 @@ OpenCode plugin that injects per-model **cost** for LiteLLM proxy models.
   `{ input, output, cache_read, cache_write, context_over_200k }`,
   `additionalProperties:false`. NEVER emit a nested `cache` object — the schema
   rejects it and the whole `cost` is dropped. Values are USD per 1M tokens.
-- Two sources, by key:
-  - **Admin/master key** → LiteLLM `/v1/model/info`. Cost is per-TOKEN → ×1e6
-    (`perMillion`), round 6dp.
-  - **Dev key** (`/v1/model/info` is admin-gated → 403) → models.dev catalog via
-    `input.client.config.providers()`. Those costs are ALREADY per-1M — copy
-    straight through, do NOT ×1e6.
+- ONE cost source: models.dev catalog via `input.client.config.providers()`.
+  Those costs are ALREADY per-1M — copy straight through, do NOT ×1e6. Never
+  source cost from the proxy (base_model misconfig silently bills $0).
+- `perMillion` (per-TOKEN → ×1e6, round 6dp) applies only to the unused
+  `/v1/model/info` reader. Do not wire it into the live path.
 - Emit `cost` only when both `input` and `output` are known. Keep a real `0`
   (free tier); drop only absent values.
 - Tiering: map LiteLLM `*_above_200k_tokens` → `context_over_200k`. Do NOT map
@@ -37,6 +36,18 @@ OpenCode plugin that injects per-model **cost** for LiteLLM proxy models.
 
 ## Discovery rules
 
+- `options.baseURL` is REQUIRED. No default URL, no port probing, never
+  localhost. Missing → warn and skip the provider.
+- `/v1/models` carries NO `mode` (shape: `id/object/created/owned_by`). `mode`
+  comes from `/model_group/info`, keyed by `model_group` = the `/v1/models`
+  id. Best-effort, 3s budget: ANY failure falls back to the id heuristics in
+  `categorizeModel`. Never let it block, throw, or drop models — it is not
+  settled whether that endpoint needs an elevated key.
+- `mode` branch is an ALLOW-list (`chat`/`completion`/`responses`); any other
+  non-empty mode is non-chat. `null`/absent → fall through to heuristics.
+  LiteLLM really does emit `mode: null`.
+- Id heuristics stay narrow — a false positive HIDES a working chat model.
+  Never match bare `nova` / `e5` / `gte` / `audio`.
 - Never overwrite a user-curated `provider.*.models` entry.
 - Fail soft: warn and continue; never throw out of the `config` hook. Skip
   malformed entries and wildcard (`*`) ids.
