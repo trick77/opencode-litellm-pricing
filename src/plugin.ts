@@ -8,7 +8,7 @@
 // Cost comes from one source: opencode's own models.dev catalog, matched to
 // each model by name (public list prices). The proxy is asked what models the
 // key can see (/v1/models) and what kind of model each one is
-// (/v1/model_group/info) — never for pricing.
+// (/model_group/info) — never for pricing.
 //
 // `options.baseURL` is required. The plugin talks to that URL and nothing
 // else: there is no default and no port auto-detection.
@@ -210,7 +210,7 @@ export const LiteLLMPricingPlugin: Plugin = async (input: PluginInput) => {
             // Never overwrite user-curated entries.
             if (models[model.id]) continue
 
-            // /v1/model_group/info is keyed by model_group, which is exactly
+            // /model_group/info is keyed by model_group, which is exactly
             // the id /v1/models reports — no alias resolution needed.
             const group = groups?.get(model.id)
             const enriched = group ? enrichModel(model, groupInfoToModelInfo(group)) : model
@@ -240,7 +240,11 @@ export const LiteLLMPricingPlugin: Plugin = async (input: PluginInput) => {
               `) from ${baseURL}` +
               // Say which signal did the filtering, so an unexpected model in
               // the picker is diagnosable without instrumenting the plugin.
-              (groups ? '' : ' [no /v1/model_group/info — non-chat filtered by name only]'),
+              // An empty map counts as "did not run": /v1/models returned
+              // models, so a group response with no usable entries classified
+              // nothing, and claiming otherwise sends the reader down the
+              // wrong path.
+              (groups?.size ? '' : ' [no /model_group/info — non-chat filtered by name only]'),
           )
         }
 

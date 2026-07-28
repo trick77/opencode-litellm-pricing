@@ -81,7 +81,7 @@ function buildTier(
 }
 
 /**
- * Adapt a /v1/model_group/info entry to the LiteLLMModelInfo shape so it can
+ * Adapt a /model_group/info entry to the LiteLLMModelInfo shape so it can
  * go through the same `enrichModel` overlay.
  *
  * `max_tokens` is deliberately NOT mapped: the group response exposes
@@ -171,7 +171,7 @@ export function toConfigModel(
 /**
  * The live path: build a config entry for a discovered model.
  *
- * `model` should already carry whatever `/v1/model_group/info` returned, so
+ * `model` should already carry whatever `/model_group/info` returned, so
  * `categorizeModel` can classify on LiteLLM's own `mode` and fall back to the
  * id heuristic only when there isn't one.
  *
@@ -183,30 +183,16 @@ export function configModelFromCatalog(
   model: LiteLLMModel,
   fields: CatalogFields | null,
 ): Record<string, unknown> | null {
-  if (categorizeModel(model) !== 'chat') return null
-
-  const entry: Record<string, unknown> = { name: formatModelName(model) }
-
-  // Same LiteLLM semantics as toConfigModel: max_input_tokens is the context
-  // window, max_output_tokens the completion cap (max_tokens its legacy
-  // alias). Emit a limit only when both are known, never a bogus 0 window.
-  const context = model.max_input_tokens
-  const output = model.max_output_tokens ?? model.max_tokens
-  if (context != null && output != null) entry.limit = { context, output }
-
-  if (model.supports_function_calling) entry.tool_call = true
-  if (model.supports_reasoning) entry.reasoning = true
-  if (model.supports_vision) entry.attachment = true
-
-  const input: Array<'text' | 'image' | 'pdf' | 'audio'> = ['text']
-  if (model.supports_vision) input.push('image')
-  if (model.supports_pdf_input) input.push('pdf')
-  if (model.supports_audio_input) input.push('audio')
-  if (input.length > 1) entry.modalities = { input, output: ['text'] }
-
+  // Identical to `toConfigModel` with no info block (no cost is ever sourced
+  // from the proxy), so it goes through that one implementation rather than a
+  // second copy of the limit/flag/modality logic that could drift.
+  const entry = toConfigModel(model, undefined)
+  if (!entry) return null
   if (fields) applyCatalogFields(entry, fields)
   return entry
 }
+
+type Modalities = { input: string[]; output: string[] }
 
 /** Merge catalog fields into an entry, without overwriting existing keys. */
 export function applyCatalogFields(entry: Record<string, unknown>, fields: CatalogFields): void {
@@ -215,5 +201,22 @@ export function applyCatalogFields(entry: Record<string, unknown>, fields: Catal
   if (fields.reasoning && entry.reasoning == null) entry.reasoning = true
   if (fields.tool_call && entry.tool_call == null) entry.tool_call = true
   if (fields.attachment && entry.attachment == null) entry.attachment = true
-  if (fields.modalities && !entry.modalities) entry.modalities = fields.modalities
+  // Union, never replace: LiteLLM's capability flags are sparse (a group that
+  // reports only `supports_vision` would otherwise shrink a catalog entry that
+  // knew about pdf/audio down to text+image).
+  if (fields.modalities) mergeModalities(entry, fields.modalities)
+}
+
+/** Merge catalog modalities into an entry's, keeping every input already listed. */
+function mergeModalities(entry: Record<string, unknown>, fromCatalog: Modalities): void {
+  const existing = entry.modalities as Modalities | undefined
+  if (!existing) {
+    entry.modalities = fromCatalog
+    return
+  }
+  const input = [...existing.input]
+  for (const modality of fromCatalog.input) {
+    if (!input.includes(modality)) input.push(modality)
+  }
+  entry.modalities = { input, output: existing.output }
 }

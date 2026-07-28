@@ -54,7 +54,7 @@ const MODEL_INFO_FIXTURE = {
   ],
 }
 
-// Shaped after LiteLLM's documented /v1/model_group/info response: keyed by
+// Shaped after LiteLLM's documented /model_group/info response: keyed by
 // model_group (the same string /v1/models reports as an id), carrying `mode`
 // and the capability flags, and no cost fields.
 const MODEL_GROUP_FIXTURE = {
@@ -77,10 +77,17 @@ const MODEL_GROUP_FIXTURE = {
   ],
 }
 
-function mockFetchOnce(payload: unknown) {
+/**
+ * Stub `fetch`, recording the URL each call targeted. The URL matters: the
+ * plugin swallows any failure from the metadata endpoint, so a wrong path
+ * degrades silently to the name heuristics instead of failing a test.
+ */
+function mockFetchOnce(payload: unknown, calls: string[] = []) {
   const original = globalThis.fetch
-  globalThis.fetch = (async () =>
-    ({ ok: true, status: 200, statusText: 'OK', json: async () => payload })) as typeof fetch
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    calls.push(String(input))
+    return { ok: true, status: 200, statusText: 'OK', json: async () => payload }
+  }) as unknown as typeof fetch
   return () => {
     globalThis.fetch = original
   }
@@ -106,9 +113,15 @@ function inject(
 }
 
 test('model groups key by model_group — the same id /v1/models reports', async () => {
-  const restore = mockFetchOnce(MODEL_GROUP_FIXTURE)
+  const calls: string[] = []
+  const restore = mockFetchOnce(MODEL_GROUP_FIXTURE, calls)
   try {
     const groups = await discoverLiteLLMModelGroups('http://proxy')
+    // LiteLLM registers this endpoint WITHOUT a /v1 prefix (unlike
+    // /model/info, which it aliases both ways). /v1/model_group/info 404s,
+    // and the caller swallows that — so assert the path here or the whole
+    // mode-based filter silently never runs against a real proxy.
+    assert.deepEqual(calls, ['http://proxy/model_group/info'])
     assert.equal(groups.size, 5)
     assert.equal(groups.get('ai-gateway-gpt-5.4')?.mode, 'chat')
     assert.equal(groups.get('acme-ranker')?.mode, 'rerank')
@@ -160,7 +173,7 @@ test('mode null falls back to the name heuristic rather than hiding the model', 
   }
 })
 
-test('a refused /v1/model_group/info falls open — models still inject, by name', async () => {
+test('a refused /model_group/info falls open — models still inject, by name', async () => {
   const restore = mockFetchStatus(403, 'Forbidden')
   try {
     await assert.rejects(discoverLiteLLMModelGroups('http://proxy'), /403/)

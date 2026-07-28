@@ -39,7 +39,7 @@ OpenCode plugin that injects per-model **cost** for LiteLLM proxy models.
 - `options.baseURL` is REQUIRED. No default URL, no port probing, never
   localhost. Missing → warn and skip the provider.
 - `/v1/models` carries NO `mode` (shape: `id/object/created/owned_by`). `mode`
-  comes from `/v1/model_group/info`, keyed by `model_group` = the `/v1/models`
+  comes from `/model_group/info`, keyed by `model_group` = the `/v1/models`
   id. Best-effort, 3s budget: ANY failure falls back to the id heuristics in
   `categorizeModel`. Never let it block, throw, or drop models — it is not
   settled whether that endpoint needs an elevated key.

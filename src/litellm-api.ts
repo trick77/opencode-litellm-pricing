@@ -20,7 +20,12 @@ import type {
 
 const MODELS_ENDPOINT = '/v1/models'
 const MODEL_INFO_ENDPOINT = '/v1/model/info'
-const MODEL_GROUP_INFO_ENDPOINT = '/v1/model_group/info'
+// NOTE: no `/v1` prefix. Unlike `/model/info` (which LiteLLM also aliases as
+// `/v1/model/info`), the model-group endpoint is registered only at the
+// unprefixed path — every example in LiteLLM's docs uses `/model_group/info`.
+// `/v1/model_group/info` 404s, which this plugin would swallow as "endpoint
+// refused" and silently degrade to the id heuristics forever.
+const MODEL_GROUP_INFO_ENDPOINT = '/model_group/info'
 const FETCH_TIMEOUT_MS = 15000
 /**
  * Tight budget for the capability lookup. It is an optional enrichment on top
@@ -109,7 +114,7 @@ export async function discoverLiteLLMModels(
 }
 
 /**
- * Fetch per-model-group capabilities from /v1/model_group/info, keyed by
+ * Fetch per-model-group capabilities from /model_group/info, keyed by
  * `model_group`.
  *
  * This is where `mode` comes from — the field that says whether a model is a
@@ -118,9 +123,11 @@ export async function discoverLiteLLMModels(
  * the non-chat filter can only guess from the model id.
  *
  * Preferred over /v1/model/info because `model_group` IS the `model_name` that
- * /v1/models reports, so no alias resolution is needed, and because the
- * response carries no cost fields — pricing stays sourced from the models.dev
- * catalog alone, one code path.
+ * /v1/models reports, so no alias resolution is needed. The response DOES
+ * carry per-token cost fields; they are deliberately not read. Pricing comes
+ * from the models.dev catalog alone, by policy: LiteLLM's numbers are only
+ * right when the deployment sets `model_info.base_model`, and getting that
+ * wrong silently bills $0.
  *
  * Callers MUST treat failure as non-fatal. Whether this endpoint needs an
  * elevated key is not settled — LiteLLM's own docs describe it both as a

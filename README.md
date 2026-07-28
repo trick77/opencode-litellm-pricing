@@ -75,7 +75,7 @@ picker.
 
 `/v1/models` says which models your key can see, but not what kind each one is
 — its response is just `{id, object, created, owned_by}`. LiteLLM keeps that in
-a `mode` field, so the plugin also reads `/v1/model_group/info`, which returns
+a `mode` field, so the plugin also reads `/model_group/info`, which returns
 `mode` plus the capability flags keyed by the same id. Anything whose mode
 isn't `chat` / `completion` / `responses` is left out, and the limits and
 capability flags it reports fill in what models.dev doesn't cover.

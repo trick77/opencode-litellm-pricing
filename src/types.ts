@@ -94,13 +94,15 @@ export interface LiteLLMModelInfoResponse {
 }
 
 /**
- * A single entry returned by LiteLLM's `/v1/model_group/info` endpoint.
+ * A single entry returned by LiteLLM's `/model_group/info` endpoint.
  *
  * Keyed by `model_group`, which is the same string `/v1/models` reports as a
  * model `id` — so unlike `/v1/model/info` no alias resolution is needed. This
  * is the plugin's source for `mode` (what kind of model it is) and for the
- * capability flags. It carries no cost fields, so pricing stays sourced from
- * the models.dev catalog alone.
+ * capability flags. The endpoint also returns per-token cost fields; they are
+ * deliberately not declared here and never read — pricing comes from the
+ * models.dev catalog by policy, because LiteLLM's own numbers silently become
+ * $0 when a deployment's `base_model` is misconfigured.
  *
  * `mode` may legitimately be `null` — LiteLLM emits that for models it has no
  * price-map entry for — which is why classification falls back to the id

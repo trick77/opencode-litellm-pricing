@@ -34,26 +34,27 @@ export function categorizeModel(model: LiteLLMModel): ModelType {
     return 'unknown'
   }
 
+  // Token boundaries include `.`: Bedrock/Vertex ids are dot-separated
+  // (`stability.sd3-large-v1:0`, `amazon.titan-embed-text-v2`), so a class of
+  // only `[-_/]` would miss the leading segment of every one of them.
   const id = model.id.toLowerCase()
   if (/rerank/.test(id)) return 'unknown'
   if (/moderat/.test(id)) return 'unknown'
   if (
-    /embedding|(?:^|[-_/])embed(?:$|[-_/])|(?:^|[-_/])voyage-|(?:^|[-_/])bge-|jina-embed|jina-clip/.test(
+    /embedding|(?:^|[-_/.])embed(?:$|[-_/.])|(?:^|[-_/.])voyage-|(?:^|[-_/.])bge-|jina-embed|jina-clip/.test(
       id,
     )
   ) {
     return 'embedding'
   }
-  if (
-    /whisper|transcrib|(?:^|[-_/])tts(?:$|[-_/])|elevenlabs|cartesia|deepgram/.test(id)
-  ) {
+  if (/whisper|transcrib|(?:^|[-_/.])tts(?:$|[-_/.])|elevenlabs|cartesia|deepgram/.test(id)) {
     return 'audio'
   }
   if (
     // `-image` must end the id or be followed by a version-ish token
     // (`grok-2-image-1212`), never by a word — `…-image-understanding` is a
     // chat model, and a bare `image` substring is far too broad.
-    /dall-?e|stable-diffusion|midjourney|(?:^|[-_/])flux(?:$|[-_/])|imagen|gpt-image|-image(?:$|[-_/]\d)|(?:^|[-_/])sd3(?:$|[-_/])|seedream/.test(
+    /dall-?e|stable-diffusion|midjourney|(?:^|[-_/.])flux(?:$|[-_/.])|imagen|gpt-image|-image(?:$|[-_/]\d)|(?:^|[-_/.])sd3(?:$|[-_/.])|seedream/.test(
       id,
     )
   ) {
