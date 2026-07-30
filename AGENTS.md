@@ -9,6 +9,17 @@ OpenCode plugin that injects per-model **cost** for LiteLLM proxy models.
 - Ships raw TS: `main` is `src/index.ts` (OpenCode/bun runs it). Every relative
   import MUST carry a `.ts` extension (`./types.ts`) — enabled by
   `allowImportingTsExtensions`. Extensionless imports break the node test runner.
+- Entry module `src/index.ts`: EVERY runtime export must be a plugin function.
+  OpenCode's loader iterates `Object.values(mod)` and throws "Plugin export is
+  not a function" on anything else. Re-export types with `export type *`, NEVER
+  `export *` — a leaked value (`LITELLM_CHAT_MODES`) broke 0.2.0, invisible to
+  `tsc` and to every unit test.
+- `test/opencode-host.test.ts` runs the plugin through a fake OpenCode loader
+  + stubbed proxy (`test/helpers/fake-opencode-host.ts`, modelled on opencode
+  1.18.6). Change loader/hook behaviour → update it. Give each scenario its OWN
+  baseURL: `injectedModelIds` is module state with no reset, so a shared URL
+  sends the second scenario down the early-return and it passes having done
+  nothing. Helpers live in `test/helpers/` so the `test/*.test.ts` glob skips them.
 
 ## Cost mapping — load-bearing rules
 
