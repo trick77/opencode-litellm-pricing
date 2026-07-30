@@ -1,4 +1,4 @@
-// opencode-litellm-pricing
+// opencode-plugin-litellm-pricing
 //
 // An opencode plugin that discovers models from a LiteLLM proxy at startup
 // and injects them into the provider's `models` map — each carrying a real
@@ -16,9 +16,9 @@
 // Configure in opencode.json:
 //
 //   {
-//     "plugin": ["opencode-litellm-pricing@latest"],
+//     "plugin": ["opencode-plugin-litellm-pricing@latest"],
 //     "provider": {
-//       "opencode-litellm-pricing": {
+//       "opencode-plugin-litellm-pricing": {
 //         "npm": "@ai-sdk/openai-compatible",
 //         "name": "LiteLLM (proxy)",
 //         "options": {
@@ -43,7 +43,11 @@ import { getCatalog, preloadCatalog } from './catalog.ts'
 
 // Default provider id — kept identical to the npm package name so the
 // `plugin` and `provider` keys in opencode.json read the same.
-const PROVIDER_ID = 'opencode-litellm-pricing'
+const PROVIDER_ID = 'opencode-plugin-litellm-pricing'
+// The pre-0.3.0 package name, which was also the default provider id. Still
+// matched, so an opencode.json written against the old name keeps working
+// after the rename — the key is user-facing config, not an internal constant.
+const LEGACY_PROVIDER_ID = 'opencode-litellm-pricing'
 
 // Minimal mutable view of the parts of opencode's config we touch. Typing
 // the hook parameter as opencode's `Config` (below) and narrowing to this
@@ -66,9 +70,13 @@ interface MutableConfig {
  */
 const injectedModelIds = new Map<string, Set<string>>()
 
-/** Does a provider id / options block designate a LiteLLM-backed provider? */
+/**
+ * Does a provider id / options block designate a LiteLLM-backed provider?
+ * Both the current and the pre-rename package name are accepted as ids.
+ */
 function isLiteLLMProvider(providerId: string, options: Record<string, unknown>): boolean {
   if (providerId === PROVIDER_ID) return true
+  if (providerId === LEGACY_PROVIDER_ID) return true
   if (providerId === 'litellm') return true
   if (providerId.startsWith('litellm-') || providerId.startsWith('litellm_')) return true
   return (

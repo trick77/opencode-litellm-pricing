@@ -1,4 +1,4 @@
-<h1>opencode-litellm-pricing</h1>
+<h1>opencode-plugin-litellm-pricing</h1>
 
 An [OpenCode](https://opencode.ai) plugin that discovers the models exposed
 by a [LiteLLM](https://litellm.ai) proxy at startup and injects them into the
@@ -10,6 +10,12 @@ it: each model is matched by **name** against OpenCode's own models.dev catalog,
 so `ai-gateway-gpt-5.4` is priced as `gpt-5.4`. Same answer for every key, one
 code path. See [How pricing works](#how-pricing-works).
 
+> **Renamed in 0.3.0.** This package was `opencode-litellm-pricing`. npm has no
+> rename, so that package is deprecated and frozen at 0.2.0 — which does not
+> load (`Plugin export is not a function`). Point your `plugin` entry at
+> `opencode-plugin-litellm-pricing`; there is no fix under the old name. Your
+> `provider` key does not need to change: the old id is still matched.
+
 ## Install
 
 Add the plugin and a LiteLLM provider to your `opencode.json`:
@@ -17,9 +23,9 @@ Add the plugin and a LiteLLM provider to your `opencode.json`:
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["opencode-litellm-pricing@latest"],
+  "plugin": ["opencode-plugin-litellm-pricing@latest"],
   "provider": {
-    "opencode-litellm-pricing": {
+    "opencode-plugin-litellm-pricing": {
       "npm": "@ai-sdk/openai-compatible",
       "name": "LiteLLM (proxy)",
       "options": {
@@ -90,8 +96,9 @@ oddly-named non-chat model can slip through when the name is all we have.
 
 ## Provider matching
 
-The plugin enriches any provider whose id is `opencode-litellm-pricing` (the
-default, matching the package name) or `litellm`, starts with `litellm-` /
+The plugin enriches any provider whose id is `opencode-plugin-litellm-pricing`
+(the default, matching the package name), the pre-0.3.0 name
+`opencode-litellm-pricing`, or `litellm`, starts with `litellm-` /
 `litellm_`, or whose `options` sets `litellm: true` (or `litellmCompatible` /
 `litellm-compatible`). Extra auth headers (e.g. Cloudflare Access) can be
 passed via `options.customHeaders`. With no matching provider in your config,
@@ -117,14 +124,15 @@ to npm via OIDC trusted publishing and cuts a GitHub Release.
 
 Prerequisites, one-time: an `npm-publish` GitHub environment, and a trusted
 publisher on the npm package pointing at owner `trick77`, repo
-`opencode-litellm-pricing`, workflow `release.yaml`, environment
+`opencode-plugin-litellm-pricing`, workflow `release.yaml`, environment
 `npm-publish`. All four must match exactly or the publish fails with a
 misleading 404.
 
 No npm token is involved — authentication is OIDC, which is also what
 `--provenance` signs with. Note that trusted publishing cannot create a package
 that does not exist yet, which is why 0.1.0 was published by hand and carries no
-provenance attestation; every tagged release from 0.1.1 on does.
+provenance attestation — and why 0.3.0, the first release under the renamed
+package, was too. Every other tagged release is published by CI with provenance.
 
 ## License
 

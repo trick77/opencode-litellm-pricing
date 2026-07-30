@@ -42,11 +42,13 @@ async function runConfigHook(config: Record<string, unknown>, routes: Routes) {
   )
 }
 
+const PROVIDER_KEY = 'opencode-plugin-litellm-pricing'
+
 /** A provider block shaped like the one the README tells users to write. */
 function providerConfig(baseURL: string, extra: Record<string, unknown> = {}) {
   return {
     provider: {
-      'opencode-litellm-pricing': {
+      [PROVIDER_KEY]: {
         // `npm` deliberately omitted — the plugin should default it.
         options: { baseURL, apiKey: 'sk-test' },
         ...extra,
@@ -101,7 +103,7 @@ test('injects discovered models with catalog pricing into the config', async () 
       }),
   })
 
-  const provider = config.provider['opencode-litellm-pricing']!
+  const provider = config.provider[PROVIDER_KEY]!
   assert.equal(provider.npm, '@ai-sdk/openai-compatible', 'npm should be defaulted')
 
   const models = provider.models as Record<string, Record<string, unknown>>
@@ -136,10 +138,52 @@ test('non-chat models are filtered out by /model_group/info mode', async () => {
       }),
   })
 
-  const models = config.provider['opencode-litellm-pricing']!.models as Record<string, unknown>
+  const models = config.provider[PROVIDER_KEY]!.models as Record<string, unknown>
   assert.ok(models['ai-gateway-gpt-5.4'], 'the chat model should survive')
   assert.equal(models['house-vectorizer'], undefined, 'the embedding model should be hidden')
   assert.ok(logs.some((l) => l.includes('1 non-chat hidden')))
+})
+
+// 3b — the rename compatibility guarantee. `provider` keys live in the user's
+// opencode.json, so the pre-0.3.0 package name must keep matching; someone who
+// only updates their `plugin` entry must not silently lose all pricing.
+test('the pre-rename provider id is still matched', async () => {
+  const config = {
+    provider: {
+      'opencode-litellm-pricing': {
+        options: { baseURL: 'https://proxy-legacy-id.test/v1', apiKey: 'sk-test' },
+      } as Record<string, unknown>,
+    },
+  }
+  await runConfigHook(config, {
+    '/v1/models': () => modelsResponse(CHAT_MODEL),
+    '/model_group/info': () => json({ data: [{ model_group: 'ai-gateway-gpt-5.4', mode: 'chat' }] }),
+  })
+
+  const models = config.provider['opencode-litellm-pricing']!.models as Record<
+    string,
+    Record<string, unknown>
+  >
+  const entry = models?.['ai-gateway-gpt-5.4']
+  assert.ok(entry, 'the legacy provider id should still be enriched')
+  // Pricing specifically — a matched-but-unpriced entry would be the silent
+  // half-failure this guarantee exists to rule out.
+  assert.deepEqual(entry.cost, { input: 2.5, output: 15, cache_read: 0.25 })
+})
+
+// 3c — matching must not have become a free-for-all.
+test('an unrelated provider id is left alone', async () => {
+  const config = {
+    provider: {
+      anthropic: {
+        options: { baseURL: 'https://proxy-unrelated.test/v1' },
+      } as Record<string, unknown>,
+    },
+  }
+  const { logs, warns } = await runConfigHook(config, {})
+
+  assert.equal(config.provider.anthropic.models, undefined, 'must not touch a foreign provider')
+  assert.deepEqual([...logs, ...warns], [], 'must say nothing about a provider it does not own')
 })
 
 // 4 — a matched provider with nothing to talk to.
@@ -163,7 +207,7 @@ test('a proxy that cannot be reached is survivable', async () => {
     },
   })
 
-  const models = config.provider['opencode-litellm-pricing']!.models as Record<string, unknown>
+  const models = config.provider[PROVIDER_KEY]!.models as Record<string, unknown>
   assert.deepEqual(models, {}, 'no models should be injected')
   assert.ok(
     warns.some((w) => w.includes('Model discovery failed')),
@@ -180,7 +224,7 @@ test('discovery still works when /model_group/info is refused', async () => {
     '/model_group/info': () => json({ error: 'forbidden' }, 403),
   })
 
-  const models = config.provider['opencode-litellm-pricing']!.models as Record<string, unknown>
+  const models = config.provider[PROVIDER_KEY]!.models as Record<string, unknown>
   assert.ok(models['ai-gateway-gpt-5.4'], 'the chat model should still be injected')
   // No `mode` available, so this one is caught by the id heuristics instead.
   assert.equal(models['ai-gateway-text-embedding-3-small'], undefined)
@@ -201,7 +245,7 @@ test('existing hand-curated model entries are never overwritten', async () => {
     '/model_group/info': () => json({ data: [{ model_group: 'ai-gateway-gpt-5.4', mode: 'chat' }] }),
   })
 
-  const models = config.provider['opencode-litellm-pricing']!.models as Record<string, unknown>
+  const models = config.provider[PROVIDER_KEY]!.models as Record<string, unknown>
   assert.deepEqual(models['ai-gateway-gpt-5.4'], curated)
   // The entry surviving is not enough on its own — it would also survive if
   // discovery never ran. The summary line proves the model WAS discovered and

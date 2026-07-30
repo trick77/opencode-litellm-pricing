@@ -65,6 +65,9 @@ OpenCode plugin that injects per-model **cost** for LiteLLM proxy models.
 - Id heuristics stay narrow — a false positive HIDES a working chat model.
   Never match bare `nova` / `e5` / `gte` / `audio`.
 - Never overwrite a user-curated `provider.*.models` entry.
+- Provider ids matched: `opencode-plugin-litellm-pricing` (package name),
+  `opencode-litellm-pricing` (pre-0.3.0 name — user config, never drop it),
+  `litellm`, `litellm-*`/`litellm_*`, `options.litellm*` flags.
 - Fail soft: warn and continue; never throw out of the `config` hook. Skip
   malformed entries and wildcard (`*`) ids.
 - models.dev name match: longest-match, boundary-anchored, providers `azure`
@@ -74,3 +77,7 @@ OpenCode plugin that injects per-model **cost** for LiteLLM proxy models.
 
 - Tag-driven. Bump `version` in `package.json`, push `vX.Y.Z` (must match). CI
   publishes to npm via OIDC trusted publishing. Do not `npm publish` by hand.
+- Tag on `master` AFTER merge — the workflow publishes whatever commit the tag
+  points at, so tagging a branch ships unmerged code.
+- Released → update `../opencode-presets/presets/plugin-litellm-pricing.conf`:
+  `@pins`, the body spec string, and bump that preset's own `@version`.
