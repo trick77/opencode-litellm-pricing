@@ -196,11 +196,18 @@ test('existing hand-curated model entries are never overwritten', async () => {
   const config = providerConfig('https://proxy-curated.test/v1', {
     models: { 'ai-gateway-gpt-5.4': curated },
   })
-  await runConfigHook(config, {
+  const { logs } = await runConfigHook(config, {
     '/v1/models': () => modelsResponse(CHAT_MODEL),
     '/model_group/info': () => json({ data: [{ model_group: 'ai-gateway-gpt-5.4', mode: 'chat' }] }),
   })
 
   const models = config.provider['opencode-litellm-pricing']!.models as Record<string, unknown>
   assert.deepEqual(models['ai-gateway-gpt-5.4'], curated)
+  // The entry surviving is not enough on its own — it would also survive if
+  // discovery never ran. The summary line proves the model WAS discovered and
+  // then deliberately skipped.
+  assert.ok(
+    logs.some((l) => l.includes('0 model(s) added')),
+    `expected discovery to have run and added nothing, got: ${logs.join(' | ')}`,
+  )
 })

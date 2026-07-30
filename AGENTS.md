@@ -20,6 +20,11 @@ OpenCode plugin that injects per-model **cost** for LiteLLM proxy models.
   baseURL: `injectedModelIds` is module state with no reset, so a shared URL
   sends the second scenario down the early-return and it passes having done
   nothing. Helpers live in `test/helpers/` so the `test/*.test.ts` glob skips them.
+- That harness runs on NODE; OpenCode runs this on BUN. Touching `src/index.ts`
+  exports or anything transpiler-sensitive → also load it for real. In a scratch
+  dir whose `opencode.json` sets `"plugin": ["file:///<abs-path-to-checkout>"]`
+  (no LiteLLM provider needed), run `opencode models --print-logs` and confirm
+  no `failed to load plugin`. Never `--pure` — it skips external plugins.
 
 ## Cost mapping — load-bearing rules
 
