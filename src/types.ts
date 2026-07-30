@@ -1,4 +1,4 @@
-// Core types for the opencode-litellm-pricing plugin.
+// Core types for the opencode-plugin-litellm-pricing plugin.
 //
 // Models the subset of LiteLLM's OpenAI-compatible /v1/models and
 // /v1/model/info payloads the plugin needs, including the cost fields used
