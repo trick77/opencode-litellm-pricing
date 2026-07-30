@@ -80,4 +80,5 @@ OpenCode plugin that injects per-model **cost** for LiteLLM proxy models.
 - Tag on `master` AFTER merge — the workflow publishes whatever commit the tag
   points at, so tagging a branch ships unmerged code.
 - Released → update `../opencode-presets/presets/plugin-litellm-pricing.conf`:
-  `@pins`, the body spec string, and bump that preset's own `@version`.
+  `@pins`, `@description` (names the package), the body spec string, and bump
+  that preset's own `@version`.
